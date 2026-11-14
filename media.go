@@ -7,6 +7,8 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"os"
+
+	_ "golang.org/x/image/webp" // WhatsApp stickers are WebP
 )
 
 // Target size for the inline preview. Rendered into a handful of terminal
@@ -36,11 +38,13 @@ func downloadMedia(chatJID, msgID string) (string, error) {
 	return env.Data.Path, nil
 }
 
-// loadImagePNG reads an image file (jpeg or png, whatever Go's image
-// package can decode by magic bytes) and re-encodes it as PNG, since the
-// kitty graphics protocol's f=100 format only accepts PNG. It also returns
-// the (pre-downscale) pixel dimensions, so the caller can size the
-// terminal-cell box to match the image's actual aspect ratio.
+// loadImagePNG reads an image file (jpeg, png, or webp — stickers are
+// WebP — whatever Go's image package can decode by magic bytes) and
+// re-encodes it as PNG, since the kitty graphics protocol's f=100 format
+// only accepts PNG. It also returns the (pre-downscale) pixel dimensions,
+// so the caller can size the terminal-cell box to match the image's
+// actual aspect ratio. Animated WebP stickers decode as their first frame
+// only; x/image/webp doesn't support animation.
 func loadImagePNG(path string) (png_ []byte, w, h int, err error) {
 	f, err := os.Open(path)
 	if err != nil {

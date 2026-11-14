@@ -191,15 +191,24 @@ func fitImage(w, h, maxCols, maxRows int) (cols, rows int) {
 // somewhere to draw without overlapping the text that follows.
 const imageBoxRows = 12
 
+// isPreviewable reports whether msg is a live (not revoked/deleted) image
+// or sticker — the kinds of media the inline preview and kitty split-pane
+// viewer know how to render.
+func isPreviewable(msg Message) bool {
+	if msg.Revoked || msg.DeletedForMe {
+		return false
+	}
+	return msg.MediaType == "image" || msg.MediaType == "sticker"
+}
+
 // hasSelectedImage reports whether the currently selected message is a
-// live (not revoked/deleted) image — the only case where the inline
-// preview is shown at all.
+// previewable image or sticker — the only case where the inline preview
+// is shown at all.
 func (m model) hasSelectedImage() bool {
 	if m.selectedMsg < 0 || m.selectedMsg >= len(m.openMsgs) {
 		return false
 	}
-	msg := m.openMsgs[m.selectedMsg]
-	return msg.MediaType == "image" && !msg.Revoked && !msg.DeletedForMe
+	return isPreviewable(m.openMsgs[m.selectedMsg])
 }
 
 // loadSelectedImage kicks off a download for the currently selected
@@ -447,7 +456,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "o":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
-				if sel.MediaType == "image" && !sel.Revoked && !sel.DeletedForMe {
+				if isPreviewable(sel) {
 					return m, enlargeImage(m.openJID, sel.MsgID)
 				}
 			}
@@ -669,9 +678,12 @@ func renderMessages(msgs []Message, width int, selectedIdx int) (string, []int) 
 				lipgloss.NewStyle().Foreground(rcDim).Render("  "+when))
 		}
 
-		isLiveImage := msg.MediaType == "image" && !msg.Revoked && !msg.DeletedForMe
-		if isLiveImage {
-			writeLine(row("🖼 [image]", rcImage, true, selected))
+		if isPreviewable(msg) {
+			marker := "🖼 [image]"
+			if msg.MediaType == "sticker" {
+				marker = "🏷 [sticker]"
+			}
+			writeLine(row(marker, rcImage, true, selected))
 			if selected {
 				// Reserve blank rows for the inline preview drawn by
 				// inlineImageEscapes, so the text below doesn't overlap it.
