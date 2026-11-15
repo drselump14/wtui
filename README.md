@@ -49,3 +49,5 @@ wtui never talks to WhatsApp directly — every chat, message, and media
 download goes through shelling out to the `wacli` CLI, which reads and
 writes its own local session store. Opening a chat sends real read
 receipts via `wacli chats mark-read`.
+
+New-message notifications live in the separate `wa-notify` project.

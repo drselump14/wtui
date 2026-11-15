@@ -32,6 +32,7 @@ type Message struct {
 	MediaType    string `json:"MediaType"`
 	Revoked      bool   `json:"Revoked"`
 	DeletedForMe bool   `json:"DeletedForMe"`
+	QuotedMsgID  string `json:"quoted_msg_id"`
 }
 
 type envelope[T any] struct {
@@ -99,6 +100,23 @@ func fetchMessages(chatJID string, limit int) ([]Message, error) {
 func markChatRead(chatJID string) error {
 	var env envelope[any]
 	if err := runWacli(&env, "chats", "mark-read", "--chat", chatJID, "--receipts"); err != nil {
+		return err
+	}
+	if !env.Success {
+		return fmt.Errorf("wacli: %s", deref(env.Error))
+	}
+	return nil
+}
+
+// sendText sends a real WhatsApp text message to chatJID. If replyTo is
+// non-empty, the message is sent as a quoted reply to that MsgID.
+func sendText(chatJID, text, replyTo string) error {
+	args := []string{"send", "text", "--to", chatJID, "--message", text}
+	if replyTo != "" {
+		args = append(args, "--reply-to", replyTo)
+	}
+	var env envelope[any]
+	if err := runWacli(&env, args...); err != nil {
 		return err
 	}
 	if !env.Success {

@@ -7,6 +7,7 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"os"
+	"os/exec"
 
 	_ "golang.org/x/image/webp" // WhatsApp stickers are WebP
 )
@@ -36,6 +37,32 @@ func downloadMedia(chatJID, msgID string) (string, error) {
 		return "", fmt.Errorf("media download: empty path in response")
 	}
 	return env.Data.Path, nil
+}
+
+// canExtractGifFrame reports whether ffmpeg is on PATH, needed to pull a
+// still frame out of a "gif" message's underlying video file for the
+// inline preview.
+func canExtractGifFrame() bool {
+	_, err := exec.LookPath("ffmpeg")
+	return err == nil
+}
+
+// extractVideoFrame pulls the first frame of a video file (WhatsApp "gif"
+// messages are really short looping videos) out to a temp PNG file via
+// ffmpeg, for loadImagePNG to downscale and re-encode like any other
+// image. The caller must remove the returned path.
+func extractVideoFrame(path string) (string, error) {
+	tmp, err := os.CreateTemp("", "wacli-frame-*.png")
+	if err != nil {
+		return "", err
+	}
+	tmp.Close()
+	cmd := exec.Command("ffmpeg", "-y", "-i", path, "-frames:v", "1", tmp.Name())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("ffmpeg: %w: %s", err, out)
+	}
+	return tmp.Name(), nil
 }
 
 // loadImagePNG reads an image file (jpeg, png, or webp — stickers are
