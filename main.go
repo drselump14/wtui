@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -48,9 +50,10 @@ type chatsLoadedMsg struct {
 }
 
 type messagesLoadedMsg struct {
-	jid  string
-	msgs []Message
-	err  error
+	jid   string
+	msgs  []Message
+	names map[string]string // newly resolved @mention IDs → names, to merge into m.mentionNames
+	err   error
 }
 
 // previewLoadMsg fires shortly after the list cursor lands on a chat; the
@@ -95,6 +98,11 @@ type model struct {
 
 	imgCache map[string]*imgEntry
 
+	// mentionNames caches @mention IDs (raw LID/phone digits embedded in
+	// message text) resolved to the mentioned contact's saved name, so
+	// loadMessages only asks wacli about ones it hasn't seen yet.
+	mentionNames map[string]string
+
 	composing    bool           // true while the send box is focused and capturing input
 	pending      []pendingSend  // outgoing messages not yet confirmed by a reload (all chats), in send order
 	pendingSeq   int            // counter for pending placeholders' local MsgIDs
@@ -104,6 +112,10 @@ type model struct {
 	input        textarea.Model // multi-line send box
 	replyToID    string         // MsgID being replied to via "r"; "" means a plain send
 	replyPreview string         // short text shown above the send box while replying
+
+	draftImagePath string // staged clipboard image (ctrl+v) awaiting a caption + enter; "" means none
+
+	startJID string // --chat flag's JID: opened as soon as the chat list loads; "" once consumed
 
 	searching  bool // true while the chat list's "ctrl+/" (ctrl+_) filter bar is focused
 	search     textinput.Model
@@ -189,10 +201,40 @@ func loadChats() tea.Cmd {
 	}
 }
 
-func loadMessages(jid string) tea.Cmd {
+// loadMessages fetches jid's messages and expands any @mentions in their
+// text from raw LID/phone digits to the mentioned contact's saved name.
+// known is the model's mentionNames cache so far; newly resolved names
+// come back on the result for the caller to merge in (this runs off the
+// main goroutine, so it can't write to the model directly).
+func loadMessages(jid string, known map[string]string) tea.Cmd {
 	return func() tea.Msg {
 		msgs, err := fetchMessages(jid, msgLimit)
-		return messagesLoadedMsg{jid: jid, msgs: msgs, err: err}
+		if err != nil {
+			return messagesLoadedMsg{jid: jid, err: err}
+		}
+
+		var need []string
+		seen := map[string]bool{}
+		for _, m := range msgs {
+			for _, id := range mentionIDs(m.DisplayText, known) {
+				if !seen[id] {
+					seen[id] = true
+					need = append(need, id)
+				}
+			}
+		}
+		names, _ := resolveMentionNames(need) // best-effort: unresolved mentions just show their raw ID
+
+		all := known
+		if len(names) > 0 {
+			all = make(map[string]string, len(known)+len(names))
+			maps.Copy(all, known)
+			maps.Copy(all, names)
+		}
+		for i := range msgs {
+			msgs[i].DisplayText = expandMentions(msgs[i].DisplayText, all)
+		}
+		return messagesLoadedMsg{jid: jid, msgs: msgs, names: names}
 	}
 }
 
@@ -211,6 +253,18 @@ func loadImage(jid, msgID, mediaType string) tea.Cmd {
 			path = framePath
 		}
 		png, w, h, err := loadImagePNG(path)
+		if err != nil && canExtractGifFrame() {
+			// x/image/webp only decodes the plain (non-extended) WebP
+			// bitstream; an animated sticker's VP8X container fails with
+			// "invalid format". ffmpeg (via libwebp) can pull its first
+			// frame out the same way it does for "gif" messages above.
+			if framePath, ferr := extractVideoFrame(path); ferr == nil {
+				defer os.Remove(framePath)
+				if p, fw, fh, ferr := loadImagePNG(framePath); ferr == nil {
+					png, w, h, err = p, fw, fh, nil
+				}
+			}
+		}
 		return imageLoadedMsg{jid: jid, msgID: msgID, png: png, w: w, h: h, err: err}
 	}
 }
@@ -290,6 +344,22 @@ func openEditorCmd(seed string) tea.Cmd {
 		}
 		return editorDoneMsg{text: strings.TrimRight(string(data), "\n")}
 	})
+}
+
+type pastedImageMsg struct {
+	path string
+	err  error
+}
+
+// pasteImageCmd grabs whatever image is on the system clipboard (e.g. a
+// screenshot, or an image copied from a browser) and saves it to a temp
+// PNG file, staged as a draft attachment until the user adds a caption
+// (optional) and sends it.
+func pasteImageCmd() tea.Cmd {
+	return func() tea.Msg {
+		path, err := clipboardImage()
+		return pastedImageMsg{path: path, err: err}
+	}
 }
 
 // composeRows is the send box's height in text rows.
@@ -773,7 +843,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		cmds := []tea.Cmd{loadChats(), tick()}
 		if m.openJID != "" {
-			cmds = append(cmds, loadMessages(m.openJID))
+			cmds = append(cmds, loadMessages(m.openJID, m.mentionNames))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -784,6 +854,20 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = ""
 		m.chats = msg.chats
+		if m.startJID != "" {
+			for i, c := range m.visibleChats() {
+				if c.JID != m.startJID {
+					continue
+				}
+				m.startJID = ""
+				m.cursor = i
+				m.focusList = false
+				m.switchChat(c)
+				return m, tea.Batch(markChatReadCmd(c.JID), loadMessages(c.JID, m.mentionNames))
+			}
+			// Not found yet (e.g. wacli's store hasn't synced it in); the
+			// next refresh's chatsLoadedMsg retries since startJID is kept.
+		}
 		if n := len(m.visibleChats()); m.cursor >= n {
 			m.cursor = n - 1
 		}
@@ -794,7 +878,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case previewLoadMsg:
 		if msg.jid == m.openJID && m.openMsgs == nil {
-			return m, loadMessages(msg.jid)
+			return m, loadMessages(msg.jid, m.mentionNames)
 		}
 		return m, nil
 
@@ -807,6 +891,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = ""
+		if len(msg.names) > 0 {
+			if m.mentionNames == nil {
+				m.mentionNames = map[string]string{}
+			}
+			maps.Copy(m.mentionNames, msg.names)
+		}
 		// Follow the newest message across refreshes only if the user
 		// hadn't scrolled back to read older ones.
 		wasAtNewest := m.selectedMsg < 0 || m.selectedMsg >= len(m.openMsgs)-1
@@ -870,6 +960,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.CursorEnd()
 		return m, m.input.Focus()
 
+	case pastedImageMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			return m, m.input.Focus()
+		}
+		m.err = ""
+		if m.draftImagePath != "" {
+			os.Remove(m.draftImagePath) // replacing an earlier staged paste
+		}
+		m.draftImagePath = msg.path
+		return m, m.input.Focus()
+
 	case videoResultMsg:
 		m.videoLoading = false
 		if msg.err != nil {
@@ -911,6 +1013,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
+				if m.draftImagePath != "" {
+					// First esc drops the staged attachment and leaves
+					// the draft text and reply context alone; a second
+					// esc then cancels composing as usual.
+					os.Remove(m.draftImagePath)
+					m.draftImagePath = ""
+					return m, nil
+				}
 				m.composing = false
 				m.replyToID = ""
 				m.replyPreview = ""
@@ -919,17 +1029,27 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "ctrl+g":
 				return m, openEditorCmd(m.input.Value())
+			case "ctrl+v":
+				if m.openJID == "" {
+					return m, nil
+				}
+				return m, pasteImageCmd()
 			case "enter":
 				text := strings.TrimSpace(m.input.Value())
-				if text == "" || m.openJID == "" {
+				if m.openJID == "" || (text == "" && m.draftImagePath == "") {
 					return m, nil
 				}
 				replyTo := m.replyToID
+				path := m.draftImagePath
 				m.input.Reset()
 				m.replyToID = ""
 				m.replyPreview = ""
+				m.draftImagePath = ""
 				// Stay in compose mode so the next message can be typed
 				// right away while this one sends in the background.
+				if path != "" {
+					return m, m.queueMediaSend(m.openJID, path, text, replyTo)
+				}
 				return m, m.queueSend(m.openJID, text, replyTo)
 			default:
 				var cmd tea.Cmd
@@ -1161,7 +1281,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.switchChat(c)
 					}
 					if m.openMsgs == nil {
-						cmds = append(cmds, loadMessages(c.JID))
+						cmds = append(cmds, loadMessages(c.JID, m.mentionNames))
 					}
 					return m, tea.Batch(cmds...)
 				}
@@ -1178,6 +1298,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.input.Focus()
 			}
 			return m, nil
+		case "A":
+			if m.openJID == "" {
+				return m, nil
+			}
+			for id := range m.unread {
+				delete(m.unread, id)
+			}
+			m.rebuildContent()
+			return m, markChatReadCmd(m.openJID)
 		case "r":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
@@ -1209,7 +1338,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd = tea.Batch(cmd, sendTick())
 			}
 			return m, cmd
-		case "ctrl+r":
+		case "f":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
 				if sel.QuotedMsgID != "" {
@@ -1242,7 +1371,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if c.JID != m.openJID {
 				m.switchChat(c)
 			}
-			cmds = append(cmds, loadMessages(c.JID))
+			cmds = append(cmds, loadMessages(c.JID, m.mentionNames))
 			return m, tea.Batch(cmds...)
 		case "n":
 			if m.msgQuery == "" {
@@ -1284,8 +1413,10 @@ func renderHelp(width, height int) string {
 		{"ctrl+d / ctrl+u", "half page down / up"},
 		{"ctrl+n / ctrl+p", "next / previous chat"},
 		{"i", "compose a message"},
+		{"ctrl+v", "paste a clipboard image (while composing)"},
+		{"A", "mark all of this chat's messages as read"},
 		{"r", "reply to selected message"},
-		{"ctrl+r", "jump to the message being replied to"},
+		{"f", "jump to the message being replied to"},
 		{"o", "open media or link"},
 		{"R / x", "retry / discard a failed send"},
 		{"/", "search messages in this chat"},
@@ -1342,7 +1473,7 @@ func (m model) View() string {
 
 	footer := "?: help  q: quit"
 	if m.composing {
-		footer = "enter: send  alt+enter/ctrl+j: new line  ctrl+g: edit in $EDITOR  esc: cancel"
+		footer = "enter: send  alt+enter/ctrl+j: new line  ctrl+g: edit in $EDITOR  ctrl+v: paste image  esc: cancel"
 	} else if m.searching {
 		footer = "↑/↓ ^n/^p: select  enter: done  esc/ctrl+/: cancel"
 	} else if m.msgSearching {
@@ -1447,8 +1578,15 @@ func (m model) sendBoxView() string {
 	case m.msgSearching:
 		m.search.Width = m.msgPaneWidth() - len(m.search.Prompt) - 1
 		replyLine = m.search.View() + "\n"
-	case m.replyToID != "":
-		replyLine = lipgloss.NewStyle().Foreground(rcDim).Render("↩ replying to: "+m.replyPreview) + "\n"
+	case m.replyToID != "" || m.draftImagePath != "":
+		var parts []string
+		if m.replyToID != "" {
+			parts = append(parts, "↩ replying to: "+m.replyPreview)
+		}
+		if m.draftImagePath != "" {
+			parts = append(parts, "📎 image attached (esc to remove)")
+		}
+		replyLine = lipgloss.NewStyle().Foreground(rcDim).Render(strings.Join(parts, "   ")) + "\n"
 	}
 	if m.composing {
 		return replyLine + m.input.View()
@@ -1764,7 +1902,12 @@ func truncate(s string, n int) string {
 }
 
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	chatJID := flag.String("chat", "", "open directly into this chat (JID), e.g. from a dock/menu-bar widget")
+	flag.Parse()
+
+	m := initialModel()
+	m.startJID = *chatJID
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

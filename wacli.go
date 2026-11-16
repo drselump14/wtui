@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // Chat mirrors a row from `wacli chats list --json`.
@@ -123,6 +124,70 @@ func sendText(chatJID, text, replyTo string) error {
 		return fmt.Errorf("wacli: %s", deref(env.Error))
 	}
 	return nil
+}
+
+// sendFile sends a file (image/video/audio/document) to chatJID, detected
+// and typed automatically by wacli. If caption is non-empty it's attached
+// as the media's caption; if replyTo is non-empty, the message is sent as
+// a quoted reply to that MsgID.
+func sendFile(chatJID, path, caption, replyTo string) error {
+	args := []string{"send", "file", "--to", chatJID, "--file", path}
+	if caption != "" {
+		args = append(args, "--caption", caption)
+	}
+	if replyTo != "" {
+		args = append(args, "--reply-to", replyTo)
+	}
+	var env envelope[any]
+	if err := runWacli(&env, args...); err != nil {
+		return err
+	}
+	if !env.Success {
+		return fmt.Errorf("wacli: %s", deref(env.Error))
+	}
+	return nil
+}
+
+type mentionResolution struct {
+	Input    string `json:"input"`
+	LID      string `json:"lid"`
+	Name     string `json:"name"`
+	Resolved bool   `json:"resolved"`
+}
+
+// resolveMentionNames maps each @mention ID in ids (bare digits, either a
+// LID or an older-style phone number) to its contact's saved name, via
+// wacli's local LID map. IDs wacli can't resolve, or resolves but has no
+// saved name for, are simply omitted from the result — the caller falls
+// back to showing the raw ID for those.
+func resolveMentionNames(ids []string) (map[string]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]string, 0, len(ids)+2)
+	args = append(args, "contacts", "resolve")
+	for _, id := range ids {
+		args = append(args, id+"@lid")
+	}
+	var env envelope[[]mentionResolution]
+	if err := runWacli(&env, args...); err != nil {
+		return nil, err
+	}
+	if !env.Success {
+		return nil, fmt.Errorf("wacli: %s", deref(env.Error))
+	}
+	names := map[string]string{}
+	for _, r := range env.Data {
+		if r.Name == "" {
+			continue
+		}
+		id := strings.TrimSuffix(r.LID, "@lid")
+		if id == "" {
+			id = strings.TrimSuffix(r.Input, "@lid")
+		}
+		names[id] = r.Name
+	}
+	return names, nil
 }
 
 func deref(s *string) string {

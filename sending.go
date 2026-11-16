@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -25,14 +26,17 @@ const (
 )
 
 type pendingSend struct {
-	id      string // local MsgID, pendingIDPrefix + counter
-	jid     string
-	text    string
-	replyTo string
-	at      time.Time
-	state   sendState
-	err     string
+	id        string // local MsgID, pendingIDPrefix + counter
+	jid       string
+	text      string // message text, or a media send's caption ("" if none)
+	mediaPath string // non-"" for a media send: local file path given to `wacli send file`
+	replyTo   string
+	at        time.Time
+	state     sendState
+	err       string
 }
+
+func (p pendingSend) isMedia() bool { return p.mediaPath != "" }
 
 type pendingSentMsg struct {
 	id  string
@@ -68,6 +72,35 @@ func (m *model) queueSend(jid, text, replyTo string) tea.Cmd {
 	return m.startNextSend()
 }
 
+// queueMediaSend appends a placeholder for a file (e.g. an image pasted
+// from the clipboard) at path, with an optional caption, and starts
+// sending it if no other send is in flight.
+func (m *model) queueMediaSend(jid, path, caption, replyTo string) tea.Cmd {
+	m.pendingSeq++
+	id := fmt.Sprintf("%s%d", pendingIDPrefix, m.pendingSeq)
+	m.pending = append(m.pending, pendingSend{
+		id:        id,
+		jid:       jid,
+		text:      caption,
+		mediaPath: path,
+		replyTo:   replyTo,
+		at:        time.Now(),
+	})
+	// The file is already on disk, so the preview can be built straight
+	// from it instead of round-tripping through wacli's media download
+	// (which only knows about messages that exist on the server).
+	if png, w, h, err := loadImagePNG(path); err == nil {
+		m.imgCache[id] = &imgEntry{png: png, w: w, h: h}
+	}
+	if jid == m.openJID && m.openMsgs != nil {
+		m.mergePending()
+		m.selectedMsg = len(m.openMsgs) - 1
+		m.rebuildContent()
+		m.scrollToSelection()
+	}
+	return m.startNextSend()
+}
+
 // startNextSend launches the oldest queued send unless one is in flight.
 func (m *model) startNextSend() tea.Cmd {
 	for i := range m.pending {
@@ -81,8 +114,15 @@ func (m *model) startNextSend() tea.Cmd {
 			continue
 		}
 		p.state = sendInFlight
-		id, jid, text, replyTo := p.id, p.jid, p.text, p.replyTo
+		id, jid, text, mediaPath, replyTo := p.id, p.jid, p.text, p.mediaPath, p.replyTo
 		send := func() tea.Msg {
+			if mediaPath != "" {
+				err := sendFile(jid, mediaPath, text, replyTo)
+				if err == nil {
+					os.Remove(mediaPath) // wacli has read it; no longer needed
+				}
+				return pendingSentMsg{id: id, err: err}
+			}
 			return pendingSentMsg{id: id, err: sendText(jid, text, replyTo)}
 		}
 		if m.sendTicking {
@@ -115,7 +155,7 @@ func (m *model) finishSend(msg pendingSentMsg) tea.Cmd {
 		m.mergePending()
 		m.rebuildContent()
 		if msg.err == nil {
-			cmds = append(cmds, loadMessages(jid))
+			cmds = append(cmds, loadMessages(jid, m.mentionNames))
 		}
 	}
 	return tea.Batch(cmds...)
@@ -133,7 +173,8 @@ func (m *model) dropDoneSends(jid string, loaded []Message) {
 			// For replies wacli prefixes DisplayText with the quoted
 			// text ("> quoted\nreply"), so match on the trailing part.
 			sameText := msg.DisplayText == p.text || strings.HasSuffix(msg.DisplayText, "\n"+p.text)
-			if claimed[i] || !msg.FromMe || !sameText {
+			sameKind := p.isMedia() == (msg.MediaType != "")
+			if claimed[i] || !msg.FromMe || !sameText || !sameKind {
 				continue
 			}
 			if ts, err := time.Parse(time.RFC3339, msg.Timestamp); err == nil && ts.Before(p.at.Add(-time.Minute)) {
@@ -158,6 +199,9 @@ func (m *model) dropDoneSends(jid string, loaded []Message) {
 func (m *model) dropFailedSend(id string) bool {
 	for i, p := range m.pending {
 		if p.id == id && p.state == sendFailed {
+			if p.isMedia() {
+				os.Remove(p.mediaPath)
+			}
 			m.pending = append(m.pending[:i], m.pending[i+1:]...)
 			return true
 		}
@@ -196,14 +240,18 @@ func (m *model) mergePending() {
 		if p.jid != m.openJID {
 			continue
 		}
-		msgs = append(msgs, Message{
+		msg := Message{
 			ChatJID:     p.jid,
 			MsgID:       p.id,
 			Timestamp:   p.at.Format(time.RFC3339),
 			FromMe:      true,
 			DisplayText: p.text,
 			QuotedMsgID: p.replyTo,
-		})
+		}
+		if p.isMedia() {
+			msg.MediaType = "image"
+		}
+		msgs = append(msgs, msg)
 	}
 	m.openMsgs = msgs
 	if m.selectedMsg >= len(m.openMsgs) {
