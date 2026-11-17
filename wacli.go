@@ -34,6 +34,14 @@ type Message struct {
 	Revoked      bool   `json:"Revoked"`
 	DeletedForMe bool   `json:"DeletedForMe"`
 	QuotedMsgID  string `json:"quoted_msg_id"`
+
+	// ReactionToID and ReactionEmoji are set only on a reaction row (a
+	// message of its own in wacli's store): ReactionToID is the MsgID being
+	// reacted to and ReactionEmoji the emoji ("" for a removed reaction).
+	// wtui never shows these as messages — it folds them into a badge under
+	// the target message instead (see loadMessages).
+	ReactionToID  string `json:"ReactionToID"`
+	ReactionEmoji string `json:"ReactionEmoji"`
 }
 
 type envelope[T any] struct {
@@ -110,11 +118,16 @@ func markChatRead(chatJID string) error {
 }
 
 // sendText sends a real WhatsApp text message to chatJID. If replyTo is
-// non-empty, the message is sent as a quoted reply to that MsgID.
-func sendText(chatJID, text, replyTo string) error {
+// non-empty, the message is sent as a quoted reply to that MsgID. mentions
+// is the phone numbers embedded as "@<phone>" tokens in text, passed
+// through so WhatsApp actually tags and notifies them.
+func sendText(chatJID, text, replyTo string, mentions []string) error {
 	args := []string{"send", "text", "--to", chatJID, "--message", text}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
+	}
+	for _, phone := range mentions {
+		args = append(args, "--mention", phone)
 	}
 	var env envelope[any]
 	if err := runWacli(&env, args...); err != nil {
@@ -137,6 +150,24 @@ func sendFile(chatJID, path, caption, replyTo string) error {
 	}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
+	}
+	var env envelope[any]
+	if err := runWacli(&env, args...); err != nil {
+		return err
+	}
+	if !env.Success {
+		return fmt.Errorf("wacli: %s", deref(env.Error))
+	}
+	return nil
+}
+
+// sendReact sends (or, with emoji == "", removes) a reaction to msgID in
+// chatJID. senderJID is the target message's original sender and is
+// required by wacli for group chats; it's ignored for 1:1 chats.
+func sendReact(chatJID, msgID, senderJID, emoji string) error {
+	args := []string{"send", "react", "--to", chatJID, "--id", msgID, "--reaction", emoji}
+	if senderJID != "" {
+		args = append(args, "--sender", senderJID)
 	}
 	var env envelope[any]
 	if err := runWacli(&env, args...); err != nil {

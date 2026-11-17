@@ -20,7 +20,7 @@ func kittySupported() bool {
 // kittyDeleteImage removes any previously placed image under the given ID
 // so repeated refreshes don't leak image data in the terminal's memory.
 func kittyDeleteImage(id int) string {
-	return fmt.Sprintf("\x1b_Ga=d,d=i,i=%d\x1b\\", id)
+	return fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", id)
 }
 
 // kittyShowImage emits the escape sequence(s) to transmit+display a PNG at
@@ -38,7 +38,7 @@ func kittyShowImage(png []byte, id, cols, rows int) string {
 			more = 1
 		}
 		if i == 0 {
-			fmt.Fprintf(&b, "\x1b_Ga=T,f=100,i=%d,c=%d,r=%d,m=%d;%s\x1b\\", id, cols, rows, more, b64[i:end])
+			fmt.Fprintf(&b, "\x1b_Ga=T,f=100,q=2,C=1,i=%d,c=%d,r=%d,m=%d;%s\x1b\\", id, cols, rows, more, b64[i:end])
 		} else {
 			fmt.Fprintf(&b, "\x1b_Gm=%d;%s\x1b\\", more, b64[i:end])
 		}

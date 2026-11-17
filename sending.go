@@ -31,6 +31,7 @@ type pendingSend struct {
 	text      string // message text, or a media send's caption ("" if none)
 	mediaPath string // non-"" for a media send: local file path given to `wacli send file`
 	replyTo   string
+	mentions  []string // phone numbers to tag via --mention (text sends only; wacli's file send has no --mention flag)
 	at        time.Time
 	state     sendState
 	err       string
@@ -54,14 +55,15 @@ func isPendingID(id string) bool { return strings.HasPrefix(id, pendingIDPrefix)
 
 // queueSend appends a placeholder for text and starts sending it if no
 // other send is in flight. The placeholder becomes the selected message.
-func (m *model) queueSend(jid, text, replyTo string) tea.Cmd {
+func (m *model) queueSend(jid, text, replyTo string, mentions []string) tea.Cmd {
 	m.pendingSeq++
 	m.pending = append(m.pending, pendingSend{
-		id:      fmt.Sprintf("%s%d", pendingIDPrefix, m.pendingSeq),
-		jid:     jid,
-		text:    text,
-		replyTo: replyTo,
-		at:      time.Now(),
+		id:       fmt.Sprintf("%s%d", pendingIDPrefix, m.pendingSeq),
+		jid:      jid,
+		text:     text,
+		replyTo:  replyTo,
+		mentions: mentions,
+		at:       time.Now(),
 	})
 	if jid == m.openJID && m.openMsgs != nil {
 		m.mergePending()
@@ -114,7 +116,7 @@ func (m *model) startNextSend() tea.Cmd {
 			continue
 		}
 		p.state = sendInFlight
-		id, jid, text, mediaPath, replyTo := p.id, p.jid, p.text, p.mediaPath, p.replyTo
+		id, jid, text, mediaPath, replyTo, mentions := p.id, p.jid, p.text, p.mediaPath, p.replyTo, p.mentions
 		send := func() tea.Msg {
 			if mediaPath != "" {
 				err := sendFile(jid, mediaPath, text, replyTo)
@@ -123,7 +125,7 @@ func (m *model) startNextSend() tea.Cmd {
 				}
 				return pendingSentMsg{id: id, err: err}
 			}
-			return pendingSentMsg{id: id, err: sendText(jid, text, replyTo)}
+			return pendingSentMsg{id: id, err: sendText(jid, text, replyTo, mentions)}
 		}
 		if m.sendTicking {
 			return send

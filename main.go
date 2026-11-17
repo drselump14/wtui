@@ -40,6 +40,8 @@ var (
 	rcOrange       = lipgloss.Color("#CC7833") // other-sender message header
 	rcRed          = lipgloss.Color("#DA4939") // errors, deleted messages
 	rcImage        = lipgloss.Color("#B452CD") // messages that carry an image
+	rcQuote        = lipgloss.Color("#ACA8B2") // quoted original text in a reply
+	rcReact        = lipgloss.Color("#45506B") // reaction chip under a message
 )
 
 type tickMsg time.Time
@@ -50,10 +52,42 @@ type chatsLoadedMsg struct {
 }
 
 type messagesLoadedMsg struct {
-	jid   string
-	msgs  []Message
-	names map[string]string // newly resolved @mention IDs → names, to merge into m.mentionNames
-	err   error
+	jid      string
+	msgs     []Message
+	names    map[string]string           // newly resolved @mention IDs → names, to merge into m.mentionNames
+	reactors map[string][]reactionDetail // target MsgID → who reacted with what, to merge into m.reactors
+	err      error
+}
+
+// reactionDetail is one reaction on a message: who gave it and which emoji.
+// Shown both as chips under a message (renderMessages, via groupReactions)
+// and, grouped the same way, by the "E" (shift+e) who-reacted popup.
+type reactionDetail struct {
+	emoji string
+	who   string
+}
+
+// reactorTab is one emoji's worth of reactors: shown as a chip under a
+// message (just its count) and as a tab in the "E" who-reacted popup (its
+// full list of names).
+type reactorTab struct {
+	emoji string
+	names []string
+}
+
+// groupReactions buckets entries by emoji, in first-seen order.
+func groupReactions(entries []reactionDetail) []reactorTab {
+	var tabs []reactorTab
+	idx := map[string]int{}
+	for _, e := range entries {
+		if i, ok := idx[e.emoji]; ok {
+			tabs[i].names = append(tabs[i].names, e.who)
+			continue
+		}
+		idx[e.emoji] = len(tabs)
+		tabs = append(tabs, reactorTab{emoji: e.emoji, names: []string{e.who}})
+	}
+	return tabs
 }
 
 // previewLoadMsg fires shortly after the list cursor lands on a chat; the
@@ -114,6 +148,20 @@ type model struct {
 	replyPreview string         // short text shown above the send box while replying
 
 	draftImagePath string // staged clipboard image (ctrl+v) awaiting a caption + enter; "" means none
+
+	mentionOpen bool // true while the "@name" dropdown is showing below the send box
+	mentionSel  int  // highlighted candidate in the mention dropdown
+
+	reactOpen   bool   // true while the emoji-reaction picker ("e") is showing below the message pane
+	reactSel    int    // highlighted emoji in the reaction picker
+	reactTarget string // MsgID being reacted to; set when the picker opens
+
+	reactors map[string][]reactionDetail // target MsgID → who reacted with what; also drives the chip row under a message
+
+	showReactors   bool         // true while the "E" who-reacted popup is shown
+	reactorTabs    []reactorTab // its tabs (one per emoji), set when it opens
+	reactorTabSel  int          // highlighted emoji tab, moved with h/l
+	reactorNameSel int          // highlighted name within the current tab, moved with j/k
 
 	startJID string // --chat flag's JID: opened as soon as the chat list loads; "" once consumed
 
@@ -213,6 +261,31 @@ func loadMessages(jid string, known map[string]string) tea.Cmd {
 			return messagesLoadedMsg{jid: jid, err: err}
 		}
 
+		// wacli stores a reaction as a message of its own; pull those out
+		// into a target-MsgID → who-reacted-with-what map (see
+		// Message.ReactionToID) so they render as a badge under the message
+		// they react to, the way WhatsApp itself shows them, instead of as
+		// their own timeline row.
+		kept := make([]Message, 0, len(msgs))
+		reactors := map[string][]reactionDetail{}
+		for _, mm := range msgs {
+			if strings.TrimSpace(mm.ReactionToID) != "" {
+				if emoji := strings.TrimSpace(mm.ReactionEmoji); emoji != "" {
+					who := mm.SenderName
+					switch {
+					case mm.FromMe:
+						who = "me"
+					case who == "":
+						who = mm.SenderJID
+					}
+					reactors[mm.ReactionToID] = append(reactors[mm.ReactionToID], reactionDetail{emoji: emoji, who: who})
+				}
+				continue
+			}
+			kept = append(kept, mm)
+		}
+		msgs = kept
+
 		var need []string
 		seen := map[string]bool{}
 		for _, m := range msgs {
@@ -234,7 +307,7 @@ func loadMessages(jid string, known map[string]string) tea.Cmd {
 		for i := range msgs {
 			msgs[i].DisplayText = expandMentions(msgs[i].DisplayText, all)
 		}
-		return messagesLoadedMsg{jid: jid, msgs: msgs, names: names}
+		return messagesLoadedMsg{jid: jid, msgs: msgs, names: names, reactors: reactors}
 	}
 }
 
@@ -266,6 +339,33 @@ func loadImage(jid, msgID, mediaType string) tea.Cmd {
 			}
 		}
 		return imageLoadedMsg{jid: jid, msgID: msgID, png: png, w: w, h: h, err: err}
+	}
+}
+
+// reactionEmojis are the "e" picker's choices: WhatsApp's own six quick
+// reactions first, then a broader common-emoji set, wrapped into a grid
+// (see renderReactGrid) once they no longer fit on one row.
+var reactionEmojis = []string{
+	"👍", "❤️", "😂", "😮", "😢", "🙏",
+	"🔥", "🎉", "👏", "😍", "😁", "😡",
+	"👎", "💯", "🤔", "😭",
+}
+
+type reactSentMsg struct{ err error }
+
+// sendReaction reacts to targetID (in the open chat) with emoji, looking up
+// the message's original sender for wacli's group --sender requirement.
+func (m model) sendReaction(targetID, emoji string) tea.Cmd {
+	jid := m.openJID
+	var senderJID string
+	for _, msg := range m.openMsgs {
+		if msg.MsgID == targetID {
+			senderJID = msg.SenderJID
+			break
+		}
+	}
+	return func() tea.Msg {
+		return reactSentMsg{err: sendReact(jid, targetID, senderJID, emoji)}
 	}
 }
 
@@ -684,7 +784,7 @@ func (m *model) markUnread(msgs []Message) {
 func (m *model) rebuildContent() {
 	w := m.msgPaneWidth()
 	m.viewport.Width = w
-	content, lineStart := renderMessages(m.openMsgs, w, m.selectedMsg, m.unread, m.sendStatusLabels())
+	content, lineStart := renderMessages(m.openMsgs, w, m.selectedMsg, m.unread, m.sendStatusLabels(), m.reactors)
 	m.msgLineStart = lineStart
 	m.viewport.SetContent(content)
 }
@@ -790,9 +890,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if id := nm.openMsgs[nm.selectedMsg].MsgID; nm.unread[id] {
 			delete(nm.unread, id)
 			nm.rebuildContent()
+			cmd = tea.Batch(cmd, markChatReadCmd(nm.openJID))
 		}
 	}
 	return nm, cmd
+}
+
+// textareaAtEnd reports whether ta's cursor sits at the very end of its
+// value. Used to gate @mention autocomplete: wtui only tracks the compose
+// cursor precisely enough to autocomplete when it's at the tail of the
+// draft, not in the middle of earlier text.
+func textareaAtEnd(ta textarea.Model) bool {
+	li := ta.LineInfo()
+	return ta.Line() == ta.LineCount()-1 && li.CharOffset == li.CharWidth
+}
+
+// acceptMention replaces the in-progress "@query" at the end of the draft
+// with "@<phone> ", the token wacli embeds for a real mention.
+func (m *model) acceptMention(c mentionCandidate) {
+	before, _, found := strings.CutLast(m.input.Value(), "@")
+	if !found {
+		return
+	}
+	m.input.SetValue(before + "@" + c.phone + " ")
+	m.input.CursorEnd()
 }
 
 // previewCursor switches the message pane to the chat under the list
@@ -817,6 +938,32 @@ func (m *model) switchChat(c Chat) {
 	m.openUnread = c.UnreadCount
 	m.selectedMsg = -1
 	m.viewport.SetContent("loading…")
+}
+
+// stepChat moves the chat-list cursor one row (down when next is true)
+// and opens that chat in the message pane, marking it read.
+func (m model) stepChat(next bool) (tea.Model, tea.Cmd) {
+	vis := m.visibleChats()
+	if len(vis) == 0 {
+		return m, nil
+	}
+	if next {
+		if m.cursor < len(vis)-1 {
+			m.cursor++
+		}
+	} else if m.cursor > 0 {
+		m.cursor--
+	}
+	c := vis[m.cursor]
+	m.focusList = false
+	cmds := []tea.Cmd{markChatReadCmd(c.JID)}
+	if c.JID != m.openJID {
+		m.switchChat(c)
+		m.replyToID = ""
+		m.replyPreview = ""
+	}
+	cmds = append(cmds, loadMessages(c.JID, m.mentionNames))
+	return m, tea.Batch(cmds...)
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -905,6 +1052,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.msgs = []Message{}
 		}
 		m.serverMsgs = msg.msgs
+		m.reactors = msg.reactors
 		m.dropDoneSends(msg.jid, msg.msgs)
 		m.mergePending()
 		if wasAtNewest || m.selectedMsg >= len(m.openMsgs) {
@@ -937,6 +1085,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err.Error()
 		}
 		return m, nil
+
+	case reactSentMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			return m, nil
+		}
+		return m, loadMessages(m.openJID, m.mentionNames)
 
 	case pendingSentMsg:
 		return m, m.finishSend(msg)
@@ -1008,11 +1163,46 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = false
 			return m, nil
 		}
+		if m.showReactors {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "h", "left":
+				if n := len(m.reactorTabs); n > 0 {
+					m.reactorTabSel = (m.reactorTabSel - 1 + n) % n
+					m.reactorNameSel = 0
+				}
+			case "l", "right":
+				if n := len(m.reactorTabs); n > 0 {
+					m.reactorTabSel = (m.reactorTabSel + 1) % n
+					m.reactorNameSel = 0
+				}
+			case "k", "up":
+				if m.reactorNameSel > 0 {
+					m.reactorNameSel--
+				}
+			case "j", "down":
+				if m.reactorTabSel < len(m.reactorTabs) {
+					if n := len(m.reactorTabs[m.reactorTabSel].names); m.reactorNameSel < n-1 {
+						m.reactorNameSel++
+					}
+				}
+			default:
+				m.showReactors = false
+			}
+			return m, nil
+		}
 		if m.composing {
 			switch msg.String() {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
+				if m.mentionOpen {
+					// First esc just dismisses the dropdown, leaving the
+					// draft (including the "@" typed so far) untouched.
+					m.mentionOpen = false
+					return m, nil
+				}
 				if m.draftImagePath != "" {
 					// First esc drops the staged attachment and leaves
 					// the draft text and reply context alone; a second
@@ -1027,6 +1217,29 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Blur()
 				m.input.Reset()
 				return m, nil
+			case "up", "down":
+				if m.mentionOpen {
+					query, _ := activeMentionQuery(m.input.Value())
+					if n := len(mentionCandidatesFor(m.openMsgs, query)); n > 0 {
+						if msg.String() == "up" {
+							m.mentionSel = (m.mentionSel - 1 + n) % n
+						} else {
+							m.mentionSel = (m.mentionSel + 1) % n
+						}
+					}
+					return m, nil
+				}
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			case "ctrl+n", "ctrl+p":
+				if m.mentionOpen {
+					return m, nil // switching chats mid-mention would strand the dropdown on the old chat's senders
+				}
+				// Switch chats without leaving the send box. The draft
+				// text and any staged image carry over; the reply
+				// context belongs to the old chat, so it is dropped.
+				return m.stepChat(msg.String() == "ctrl+n")
 			case "ctrl+g":
 				return m, openEditorCmd(m.input.Value())
 			case "ctrl+v":
@@ -1034,13 +1247,28 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, pasteImageCmd()
-			case "enter":
+			case "tab", "enter":
+				if m.mentionOpen {
+					if query, ok := activeMentionQuery(m.input.Value()); ok {
+						if cands := mentionCandidatesFor(m.openMsgs, query); len(cands) > 0 {
+							m.acceptMention(cands[m.mentionSel%len(cands)])
+							m.mentionOpen = false
+							m.mentionSel = 0
+							return m, nil
+						}
+					}
+					m.mentionOpen = false
+				}
+				if msg.String() == "tab" {
+					return m, nil
+				}
 				text := strings.TrimSpace(m.input.Value())
 				if m.openJID == "" || (text == "" && m.draftImagePath == "") {
 					return m, nil
 				}
 				replyTo := m.replyToID
 				path := m.draftImagePath
+				mentions := pendingMentionPhones(text)
 				m.input.Reset()
 				m.replyToID = ""
 				m.replyPreview = ""
@@ -1050,10 +1278,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if path != "" {
 					return m, m.queueMediaSend(m.openJID, path, text, replyTo)
 				}
-				return m, m.queueSend(m.openJID, text, replyTo)
+				return m, m.queueSend(m.openJID, text, replyTo, mentions)
 			default:
 				var cmd tea.Cmd
 				m.input, cmd = m.input.Update(msg)
+				if query, ok := activeMentionQuery(m.input.Value()); ok && textareaAtEnd(m.input) {
+					m.mentionOpen = len(mentionCandidatesFor(m.openMsgs, query)) > 0
+					m.mentionSel = 0
+				} else {
+					m.mentionOpen = false
+				}
 				return m, cmd
 			}
 		}
@@ -1139,6 +1373,36 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, cmd
 			}
+		}
+
+		if m.reactOpen {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				m.reactOpen = false
+				return m, nil
+			case "left", "h":
+				m.reactSel = (m.reactSel - 1 + len(reactionEmojis)) % len(reactionEmojis)
+				return m, nil
+			case "right", "l":
+				m.reactSel = (m.reactSel + 1) % len(reactionEmojis)
+				return m, nil
+			case "up", "k":
+				if cols := reactGridCols(m.msgPaneWidth()); m.reactSel-cols >= 0 {
+					m.reactSel -= cols
+				}
+				return m, nil
+			case "down", "j":
+				if cols := reactGridCols(m.msgPaneWidth()); m.reactSel+cols < len(reactionEmojis) {
+					m.reactSel += cols
+				}
+				return m, nil
+			case "enter":
+				m.reactOpen = false
+				return m, m.sendReaction(m.reactTarget, reactionEmojis[m.reactSel])
+			}
+			return m, nil
 		}
 
 		key := msg.String()
@@ -1320,6 +1584,30 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.input.Focus()
 			}
 			return m, nil
+		case "e":
+			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
+				sel := m.openMsgs[m.selectedMsg]
+				if isPendingID(sel.MsgID) {
+					m.err = "can't react to a message that hasn't been sent yet"
+					return m, nil
+				}
+				m.reactOpen = true
+				m.reactSel = 0
+				m.reactTarget = sel.MsgID
+			}
+			return m, nil
+		case "E":
+			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
+				if entries := m.reactors[m.openMsgs[m.selectedMsg].MsgID]; len(entries) > 0 {
+					m.reactorTabs = groupReactions(entries)
+					m.reactorTabSel = 0
+					m.reactorNameSel = 0
+					m.showReactors = true
+				} else {
+					m.err = "no reactions on this message"
+				}
+			}
+			return m, nil
 		case "R", "x":
 			if m.focusList || m.selectedMsg < 0 || m.selectedMsg >= len(m.openMsgs) {
 				return m, nil
@@ -1354,25 +1642,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.loadSelectedImage()
 		case "ctrl+n", "ctrl+p":
-			vis := m.visibleChats()
-			if len(vis) == 0 {
-				return m, nil
-			}
-			if key == "ctrl+n" {
-				if m.cursor < len(vis)-1 {
-					m.cursor++
-				}
-			} else if m.cursor > 0 {
-				m.cursor--
-			}
-			c := vis[m.cursor]
-			m.focusList = false
-			cmds := []tea.Cmd{markChatReadCmd(c.JID)}
-			if c.JID != m.openJID {
-				m.switchChat(c)
-			}
-			cmds = append(cmds, loadMessages(c.JID, m.mentionNames))
-			return m, tea.Batch(cmds...)
+			return m.stepChat(key == "ctrl+n")
 		case "n":
 			if m.msgQuery == "" {
 				return m, nil
@@ -1411,11 +1681,14 @@ func renderHelp(width, height int) string {
 		{"j/k, ↑/↓", "move selection"},
 		{"gg / G", "jump to first / last"},
 		{"ctrl+d / ctrl+u", "half page down / up"},
-		{"ctrl+n / ctrl+p", "next / previous chat"},
+		{"ctrl+n / ctrl+p", "next / previous chat (also while composing)"},
 		{"i", "compose a message"},
 		{"ctrl+v", "paste a clipboard image (while composing)"},
+		{"@", "mention a sender in this chat (tab/enter picks, ↑/↓ moves)"},
 		{"A", "mark all of this chat's messages as read"},
 		{"r", "reply to selected message"},
+		{"e", "react to selected message (←/→/↑/↓ pick, enter send)"},
+		{"E", "who reacted to selected message (h/l emoji tabs, j/k names)"},
 		{"f", "jump to the message being replied to"},
 		{"o", "open media or link"},
 		{"R / x", "retry / discard a failed send"},
@@ -1451,9 +1724,52 @@ func renderHelp(width, height int) string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
+// renderReactors draws the "E" who-reacted popup: one "emoji  name" line per
+// reaction on the selected message, in a centered box like renderHelp.
+func renderReactors(tabs []reactorTab, tabSel, nameSel, width, height int) string {
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Bold(true).Render("reactions"))
+	b.WriteString("\n\n")
+
+	chips := make([]string, len(tabs))
+	for i, t := range tabs {
+		label := fmt.Sprintf(" %s %d ", t.emoji, len(t.names))
+		if i == tabSel {
+			chips[i] = lipgloss.NewStyle().Bold(true).Background(rcYellow).Foreground(rcBg).Render(label)
+		} else {
+			chips[i] = lipgloss.NewStyle().Foreground(rcFg).Render(label)
+		}
+	}
+	b.WriteString(strings.Join(chips, " "))
+	b.WriteString("\n\n")
+
+	if tabSel >= 0 && tabSel < len(tabs) {
+		for i, who := range tabs[tabSel].names {
+			style := lipgloss.NewStyle().Foreground(rcFg)
+			if i == nameSel {
+				style = lipgloss.NewStyle().Background(rcMsgSelection).Foreground(rcYellow)
+			}
+			b.WriteString(style.Render(who))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString(lipgloss.NewStyle().Foreground(rcDim).Render("\nh/l switch emoji · j/k move · any other key closes"))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(rcDim).
+		Background(rcBg).
+		Padding(1, 2).
+		Render(b.String())
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+}
+
 func (m model) View() string {
 	if !m.ready {
 		return "loading…"
+	}
+	if m.showReactors {
+		return renderReactors(m.reactorTabs, m.reactorTabSel, m.reactorNameSel, m.width, m.height)
 	}
 	if m.showHelp {
 		return renderHelp(m.width, m.height)
@@ -1571,22 +1887,32 @@ func (m model) matchStatus() string {
 // message pane: the live textinput while composing, or a dim hint
 // otherwise.
 func (m model) sendBoxView() string {
+	if m.reactOpen {
+		// Its own fixed-height block (see renderReactGrid) rather than a
+		// single replyLine row: the emoji grid can wrap to several lines.
+		return renderReactGrid(m.reactSel, m.msgPaneWidth())
+	}
 	// Always 1+composeRows lines (a reply-context line, then the input or
 	// hint rows) so the message pane's height never shifts between states.
 	replyLine := "\n"
 	switch {
+	case m.composing && m.mentionOpen:
+		query, _ := activeMentionQuery(m.input.Value())
+		replyLine = renderMentionRow(mentionCandidatesFor(m.openMsgs, query), m.mentionSel) + "\n"
 	case m.msgSearching:
 		m.search.Width = m.msgPaneWidth() - len(m.search.Prompt) - 1
 		replyLine = m.search.View() + "\n"
 	case m.replyToID != "" || m.draftImagePath != "":
 		var parts []string
 		if m.replyToID != "" {
-			parts = append(parts, "↩ replying to: "+m.replyPreview)
+			label := lipgloss.NewStyle().Foreground(rcYellow).Render("↩ replying to:")
+			preview := lipgloss.NewStyle().Foreground(rcFg).Render(m.replyPreview)
+			parts = append(parts, label+" "+preview)
 		}
 		if m.draftImagePath != "" {
-			parts = append(parts, "📎 image attached (esc to remove)")
+			parts = append(parts, lipgloss.NewStyle().Foreground(rcFg).Render("📎 image attached (esc to remove)"))
 		}
-		replyLine = lipgloss.NewStyle().Foreground(rcDim).Render(strings.Join(parts, "   ")) + "\n"
+		replyLine = strings.Join(parts, "   ") + "\n"
 	}
 	if m.composing {
 		return replyLine + m.input.View()
@@ -1596,6 +1922,69 @@ func (m model) sendBoxView() string {
 		hint = lipgloss.NewStyle().Foreground(rcDim).Render("press i to send, r to reply")
 	}
 	return replyLine + hint + strings.Repeat("\n", composeRows-1)
+}
+
+// renderReactRow draws the "e" emoji-reaction picker as a single line:
+// each candidate emoji, with sel picked out in a filled highlight.
+// reactGridCols returns how many reactionEmojis cells fit in one row of
+// width columns, so renderReactGrid's wrapping and the "up"/"down" picker
+// navigation agree on the same row width.
+func reactGridCols(width int) int {
+	n, w := 0, 0
+	for _, e := range reactionEmojis {
+		cw := lipgloss.Width(" " + e + " ")
+		if n > 0 && w+cw > width {
+			break
+		}
+		w += cw
+		n++
+	}
+	return max(n, 1)
+}
+
+// renderReactGrid draws the "e" emoji-reaction picker: a label, the emoji
+// grid (wrapped to width, sel picked out in a filled highlight), and a key
+// hint, padded/truncated to exactly 1+composeRows lines so opening it
+// doesn't shift the message pane's height.
+func renderReactGrid(sel, width int) string {
+	const totalLines = 1 + composeRows
+	cols := reactGridCols(width)
+	lines := []string{lipgloss.NewStyle().Foreground(rcYellow).Render("react to message:")}
+	for i := 0; i < len(reactionEmojis); i += cols {
+		end := min(i+cols, len(reactionEmojis))
+		var row strings.Builder
+		for j := i; j < end; j++ {
+			cell := " " + reactionEmojis[j] + " "
+			if j == sel {
+				cell = lipgloss.NewStyle().Background(rcYellow).Render(cell)
+			}
+			row.WriteString(cell)
+		}
+		lines = append(lines, row.String())
+	}
+	lines = append(lines, lipgloss.NewStyle().Foreground(rcDim).Render("←/→/↑/↓ pick · enter send · esc cancel"))
+	for len(lines) < totalLines {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:totalLines], "\n")
+}
+
+// renderMentionRow draws the "@name" autocomplete dropdown as a single
+// line: each candidate's name, with sel picked out in a filled highlight.
+func renderMentionRow(cands []mentionCandidate, sel int) string {
+	label := lipgloss.NewStyle().Foreground(rcYellow).Render("@ mention:")
+	if len(cands) == 0 {
+		return label + " " + lipgloss.NewStyle().Foreground(rcDim).Render("no match")
+	}
+	parts := make([]string, len(cands))
+	for i, c := range cands {
+		style := lipgloss.NewStyle().Foreground(rcFg)
+		if i == sel%len(cands) {
+			style = lipgloss.NewStyle().Foreground(rcBg).Background(rcYellow).Bold(true)
+		}
+		parts[i] = style.Render(c.name)
+	}
+	return label + " " + strings.Join(parts, "  ")
 }
 
 // listBottomLine renders the chat list's bottom row: the live filter
@@ -1652,8 +2041,14 @@ func (m model) inlineImageEscapes() string {
 	cols, rows := fitImage(e.w, e.h, m.msgPaneWidth()-2, availRows)
 	topRow := 4 + rel        // msgPane border(1) + header(1) + divider(1), then rel lines into the viewport
 	leftCol := listWidth + 4 // listPane width+border, then msgPane's own border+inset
+	// Save/restore the cursor around the absolute move: bubbletea's
+	// renderer repaints relative to where it believes the cursor is (end
+	// of the footer), so leaving it parked at the image would shift the
+	// next frame's lines onto the wrong rows.
+	b.WriteString("\x1b7")
 	fmt.Fprintf(&b, "\x1b[%d;%dH", topRow, leftCol)
 	b.WriteString(kittyShowImage(e.png, imgID, cols, rows))
+	b.WriteString("\x1b8")
 	return b.String()
 }
 
@@ -1750,7 +2145,7 @@ func renderChatList(chats []Chat, cursor int, openJID string, focused bool, widt
 // pane — see imagePaneEscapes. lineStart[i] is the first content line of
 // msgs[i] (lineStart[len(msgs)] is the total line count), used to scroll a
 // selection fully into view.
-func renderMessages(msgs []Message, width int, selectedIdx int, unread map[string]bool, status map[string]sendLabel) (string, []int) {
+func renderMessages(msgs []Message, width int, selectedIdx int, unread map[string]bool, status map[string]sendLabel, reactors map[string][]reactionDetail) (string, []int) {
 	if len(msgs) == 0 {
 		return lipgloss.NewStyle().Faint(true).Render("no messages"), nil
 	}
@@ -1856,14 +2251,55 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 			textColor = rcYellow // body text stands out yellow; deleted/revoked stays red
 		}
 		if text != "" {
-			for _, l := range wrapPlain(collapseBlankLines(text), width) {
+			quote, body := splitQuotedReply(text)
+			if quote != "" {
+				for _, l := range wrapPlain(quote, width-2) {
+					writeLine(row("│ "+l, rcQuote, false, selected))
+				}
+			}
+			for _, l := range wrapPlain(collapseBlankLines(body), width) {
 				writeLine(row(l, textColor, false, selected))
 			}
+		}
+		if entries := reactors[msg.MsgID]; len(entries) > 0 {
+			// Small rounded-looking chips under the message's left edge,
+			// one per emoji, the way WhatsApp shows reactions under a
+			// bubble — not one flat bar, and not the same color as the
+			// row/chat selection highlights.
+			chipStyle := lipgloss.NewStyle().Background(rcReact).Foreground(rcFg)
+			gapStyle := lipgloss.NewStyle().Background(rowBg)
+			var chips strings.Builder
+			chips.WriteString(gapStyle.Render(" "))
+			for i, t := range groupReactions(entries) {
+				if i > 0 {
+					chips.WriteString(gapStyle.Render(" "))
+				}
+				chips.WriteString(chipStyle.Render(fmt.Sprintf(" %s %d ", t.emoji, len(t.names))))
+			}
+			pad := max(width-lipgloss.Width(chips.String()), 0)
+			chips.WriteString(gapStyle.Render(strings.Repeat(" ", pad)))
+			writeLine(chips.String())
 		}
 		writeLine(row("", rcFg, false, selected))
 	}
 	lineStart = append(lineStart, line)
 	return b.String(), lineStart
+}
+
+// splitQuotedReply splits a reply's DisplayText into the quoted original
+// (wacli's "> quoted\nbody" header, see wacli's buildDisplayText) and the
+// actual reply body, so renderMessages can style the two differently
+// instead of showing them as one indistinguishable block. quote == "" means
+// text isn't a reply.
+func splitQuotedReply(text string) (quote, body string) {
+	if strings.HasPrefix(text, "> ") {
+		rest := text[2:]
+		if quote, body, ok := strings.Cut(rest, "\n"); ok {
+			return quote, body
+		}
+		return rest, ""
+	}
+	return "", text
 }
 
 // collapseBlankLines drops empty lines from a message's text (wacli's
