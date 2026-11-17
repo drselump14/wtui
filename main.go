@@ -215,7 +215,7 @@ func initialModel() model {
 
 	filePathInput := textinput.New()
 	filePathInput.Prompt = "📎 "
-	filePathInput.Placeholder = "path to file… (enter: attach, esc: cancel)"
+	filePathInput.Placeholder = "path to file… (enter: attach, tab: complete, esc: cancel)"
 	filePathInput.CharLimit = 1024
 
 	return model{
@@ -471,6 +471,113 @@ func pasteImageCmd() tea.Cmd {
 		path, err := clipboardImage()
 		return pastedImageMsg{path: path, err: err}
 	}
+}
+
+// filePicker describes a terminal file manager that can be driven as a
+// one-shot "choose a file" dialog: run full-screen in place of wtui, it
+// writes the chosen path to a file of our choosing before exiting.
+type filePicker struct {
+	bin string
+	cmd func(outFile string) *exec.Cmd
+}
+
+// filePickers are tried in order; the first one found on PATH is used by
+// ctrl+t. Each is a common terminal file manager that supports writing
+// its selection to a file instead of just opening it.
+var filePickers = []filePicker{
+	{"ranger", func(out string) *exec.Cmd { return exec.Command("ranger", "--choosefile="+out) }},
+	{"lf", func(out string) *exec.Cmd { return exec.Command("lf", "-selection-path", out) }},
+	{"vifm", func(out string) *exec.Cmd { return exec.Command("vifm", "--choose-files", out) }},
+	{"nnn", func(out string) *exec.Cmd { return exec.Command("nnn", "-p", out) }},
+}
+
+// findFilePicker returns the first available filePicker on PATH, or nil if
+// none of them are installed.
+func findFilePicker() *filePicker {
+	for i := range filePickers {
+		if _, err := exec.LookPath(filePickers[i].bin); err == nil {
+			return &filePickers[i]
+		}
+	}
+	return nil
+}
+
+type filePickedMsg struct {
+	path string // "" if the user quit the picker without choosing anything
+	err  error
+}
+
+// pickFileCmd takes over the terminal to run the first available file
+// manager (see filePickers) as a chooser, the same way openEditorCmd takes
+// it over to run $EDITOR. The chosen path is recovered from a temp file
+// the picker is told to write it to.
+func pickFileCmd(picker filePicker) tea.Cmd {
+	f, err := os.CreateTemp("", "wtui-pick-*")
+	if err != nil {
+		return func() tea.Msg { return filePickedMsg{err: err} }
+	}
+	out := f.Name()
+	f.Close()
+	os.Remove(out) // some pickers (ranger) refuse to write over an existing file
+
+	return tea.ExecProcess(picker.cmd(out), func(err error) tea.Msg {
+		defer os.Remove(out)
+		if err != nil {
+			return filePickedMsg{err: err}
+		}
+		data, rerr := os.ReadFile(out)
+		if rerr != nil {
+			return filePickedMsg{} // quit without choosing anything; not an error
+		}
+		path, _, _ := strings.Cut(string(data), "\n") // one path per line; take the first
+		return filePickedMsg{path: strings.TrimSpace(path)}
+	})
+}
+
+// completePath extends raw's final path segment to the longest unambiguous
+// match among sibling entries in its directory, for the ctrl+t manual
+// path prompt's tab-completion. A single match also gets a trailing "/"
+// when it's a directory, so completion can continue into it. raw is
+// returned unchanged if its directory can't be read or nothing matches.
+func completePath(raw string) string {
+	dir, base := filepath.Split(raw)
+	readDir := dir
+	if readDir == "" {
+		readDir = "."
+	} else {
+		readDir = expandUserPath(readDir)
+	}
+	entries, err := os.ReadDir(readDir)
+	if err != nil {
+		return raw
+	}
+	var matches []string
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, base) {
+			continue
+		}
+		if e.IsDir() {
+			name += "/"
+		}
+		matches = append(matches, name)
+	}
+	if len(matches) == 0 {
+		return raw
+	}
+	common := matches[0]
+	for _, name := range matches[1:] {
+		n := min(len(common), len(name))
+		i := 0
+		for i < n && common[i] == name[i] {
+			i++
+		}
+		common = common[:i]
+	}
+	if common == "" || common == base {
+		return raw
+	}
+	return dir + common
 }
 
 // expandUserPath expands a leading "~" (or "~/...") in a user-typed file
@@ -1156,6 +1263,29 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.draftFileOwned = true
 		return m, m.input.Focus()
 
+	case filePickedMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			return m, m.input.Focus()
+		}
+		if msg.path == "" {
+			return m, m.input.Focus() // quit the picker without choosing anything
+		}
+		path := expandUserPath(msg.path)
+		if info, serr := os.Stat(path); serr != nil {
+			m.err = serr.Error()
+			return m, m.input.Focus()
+		} else if info.IsDir() {
+			m.err = "can't attach a directory"
+			return m, m.input.Focus()
+		}
+		if m.draftImagePath != "" && m.draftFileOwned {
+			os.Remove(m.draftImagePath) // replacing an earlier staged attachment
+		}
+		m.draftImagePath = path
+		m.draftFileOwned = false // references the user's own file; never deleted by wtui
+		return m, m.input.Focus()
+
 	case videoResultMsg:
 		m.videoLoading = false
 		if msg.err != nil {
@@ -1255,6 +1385,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.filePathInput.Reset()
 					m.filePathInput.Blur()
 					return m, nil
+				case "tab":
+					m.filePathInput.SetValue(completePath(m.filePathInput.Value()))
+					m.filePathInput.CursorEnd()
+					return m, nil
 				default:
 					var cmd tea.Cmd
 					m.filePathInput, cmd = m.filePathInput.Update(msg)
@@ -1322,6 +1456,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.openJID == "" {
 					return m, nil
 				}
+				if picker := findFilePicker(); picker != nil {
+					return m, pickFileCmd(*picker)
+				}
+				// No ranger/lf/vifm/nnn on PATH: fall back to typing the
+				// path by hand, with tab-completion.
 				m.attachingFile = true
 				m.filePathInput.Reset()
 				return m, m.filePathInput.Focus()
@@ -1763,7 +1902,7 @@ func renderHelp(width, height int) string {
 		{"ctrl+n / ctrl+p", "next / previous chat (also while composing)"},
 		{"i", "compose a message"},
 		{"ctrl+v", "paste a clipboard image (while composing)"},
-		{"ctrl+t", "attach a file from this pc by path (while composing)"},
+		{"ctrl+t", "attach a file from this pc: ranger/lf/vifm/nnn if found, else type a path (while composing)"},
 		{"@", "mention a sender in this chat (tab/enter picks, ↑/↓ moves)"},
 		{"A", "mark all of this chat's messages as read"},
 		{"r", "reply to selected message"},
