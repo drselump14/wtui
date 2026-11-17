@@ -26,15 +26,16 @@ const (
 )
 
 type pendingSend struct {
-	id        string // local MsgID, pendingIDPrefix + counter
-	jid       string
-	text      string // message text, or a media send's caption ("" if none)
-	mediaPath string // non-"" for a media send: local file path given to `wacli send file`
-	replyTo   string
-	mentions  []string // phone numbers to tag via --mention (text sends only; wacli's file send has no --mention flag)
-	at        time.Time
-	state     sendState
-	err       string
+	id         string // local MsgID, pendingIDPrefix + counter
+	jid        string
+	text       string // message text, or a media send's caption ("" if none)
+	mediaPath  string // non-"" for a media send: local file path given to `wacli send file`
+	mediaOwned bool   // true if mediaPath is a wtui temp file to delete once wacli has read it; false for a user file (ctrl+t attach), left untouched on disk
+	replyTo    string
+	mentions   []string // phone numbers to tag via --mention (text sends only; wacli's file send has no --mention flag)
+	at         time.Time
+	state      sendState
+	err        string
 }
 
 func (p pendingSend) isMedia() bool { return p.mediaPath != "" }
@@ -74,19 +75,22 @@ func (m *model) queueSend(jid, text, replyTo string, mentions []string) tea.Cmd 
 	return m.startNextSend()
 }
 
-// queueMediaSend appends a placeholder for a file (e.g. an image pasted
-// from the clipboard) at path, with an optional caption, and starts
-// sending it if no other send is in flight.
-func (m *model) queueMediaSend(jid, path, caption, replyTo string) tea.Cmd {
+// queueMediaSend appends a placeholder for a file (pasted from the
+// clipboard, or attached from disk via ctrl+t) at path, with an optional
+// caption, and starts sending it if no other send is in flight. owned
+// marks path as a wtui temp file to delete once sent; a user's own
+// attached file is left on disk either way.
+func (m *model) queueMediaSend(jid, path, caption, replyTo string, owned bool) tea.Cmd {
 	m.pendingSeq++
 	id := fmt.Sprintf("%s%d", pendingIDPrefix, m.pendingSeq)
 	m.pending = append(m.pending, pendingSend{
-		id:        id,
-		jid:       jid,
-		text:      caption,
-		mediaPath: path,
-		replyTo:   replyTo,
-		at:        time.Now(),
+		id:         id,
+		jid:        jid,
+		text:       caption,
+		mediaPath:  path,
+		mediaOwned: owned,
+		replyTo:    replyTo,
+		at:         time.Now(),
 	})
 	// The file is already on disk, so the preview can be built straight
 	// from it instead of round-tripping through wacli's media download
@@ -116,11 +120,11 @@ func (m *model) startNextSend() tea.Cmd {
 			continue
 		}
 		p.state = sendInFlight
-		id, jid, text, mediaPath, replyTo, mentions := p.id, p.jid, p.text, p.mediaPath, p.replyTo, p.mentions
+		id, jid, text, mediaPath, mediaOwned, replyTo, mentions := p.id, p.jid, p.text, p.mediaPath, p.mediaOwned, p.replyTo, p.mentions
 		send := func() tea.Msg {
 			if mediaPath != "" {
 				err := sendFile(jid, mediaPath, text, replyTo)
-				if err == nil {
+				if err == nil && mediaOwned {
 					os.Remove(mediaPath) // wacli has read it; no longer needed
 				}
 				return pendingSentMsg{id: id, err: err}
@@ -201,7 +205,7 @@ func (m *model) dropDoneSends(jid string, loaded []Message) {
 func (m *model) dropFailedSend(id string) bool {
 	for i, p := range m.pending {
 		if p.id == id && p.state == sendFailed {
-			if p.isMedia() {
+			if p.isMedia() && p.mediaOwned {
 				os.Remove(p.mediaPath)
 			}
 			m.pending = append(m.pending[:i], m.pending[i+1:]...)

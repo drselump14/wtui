@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -147,7 +148,11 @@ type model struct {
 	replyToID    string         // MsgID being replied to via "r"; "" means a plain send
 	replyPreview string         // short text shown above the send box while replying
 
-	draftImagePath string // staged clipboard image (ctrl+v) awaiting a caption + enter; "" means none
+	draftImagePath string // staged attachment (clipboard paste or ctrl+t file) awaiting a caption + enter; "" means none
+	draftFileOwned bool   // true if draftImagePath is a wtui temp file (clipboard paste) to delete once sent/replaced/dropped; false for a user file (ctrl+t), left untouched on disk
+
+	attachingFile bool // true while the ctrl+t "attach file" path prompt is showing below the send box
+	filePathInput textinput.Model
 
 	mentionOpen bool // true while the "@name" dropdown is showing below the send box
 	mentionSel  int  // highlighted candidate in the mention dropdown
@@ -208,13 +213,19 @@ func initialModel() model {
 	search.Placeholder = "search chats…"
 	search.CharLimit = 200
 
+	filePathInput := textinput.New()
+	filePathInput.Prompt = "📎 "
+	filePathInput.Placeholder = "path to file… (enter: attach, esc: cancel)"
+	filePathInput.CharLimit = 1024
+
 	return model{
-		focusList:   false,
-		ready:       false,
-		selectedMsg: -1,
-		imgCache:    map[string]*imgEntry{},
-		input:       ti,
-		search:      search,
+		focusList:     false,
+		ready:         false,
+		selectedMsg:   -1,
+		imgCache:      map[string]*imgEntry{},
+		input:         ti,
+		search:        search,
+		filePathInput: filePathInput,
 	}
 }
 
@@ -460,6 +471,23 @@ func pasteImageCmd() tea.Cmd {
 		path, err := clipboardImage()
 		return pastedImageMsg{path: path, err: err}
 	}
+}
+
+// expandUserPath expands a leading "~" (or "~/...") in a user-typed file
+// path to the current user's home directory; any other path is returned
+// unchanged.
+func expandUserPath(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // composeRows is the send box's height in text rows.
@@ -1121,10 +1149,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.input.Focus()
 		}
 		m.err = ""
-		if m.draftImagePath != "" {
+		if m.draftImagePath != "" && m.draftFileOwned {
 			os.Remove(m.draftImagePath) // replacing an earlier staged paste
 		}
 		m.draftImagePath = msg.path
+		m.draftFileOwned = true
 		return m, m.input.Focus()
 
 	case videoResultMsg:
@@ -1193,6 +1222,45 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.composing {
+			if m.attachingFile {
+				switch msg.String() {
+				case "ctrl+c":
+					return m, tea.Quit
+				case "esc":
+					m.attachingFile = false
+					m.filePathInput.Reset()
+					m.filePathInput.Blur()
+					return m, nil
+				case "enter":
+					raw := strings.TrimSpace(m.filePathInput.Value())
+					if raw == "" {
+						return m, nil
+					}
+					path := expandUserPath(raw)
+					info, err := os.Stat(path)
+					if err != nil {
+						m.err = err.Error()
+						return m, nil
+					}
+					if info.IsDir() {
+						m.err = "can't attach a directory"
+						return m, nil
+					}
+					if m.draftImagePath != "" && m.draftFileOwned {
+						os.Remove(m.draftImagePath) // replacing an earlier staged attachment
+					}
+					m.draftImagePath = path
+					m.draftFileOwned = false // references the user's own file; never deleted by wtui
+					m.attachingFile = false
+					m.filePathInput.Reset()
+					m.filePathInput.Blur()
+					return m, nil
+				default:
+					var cmd tea.Cmd
+					m.filePathInput, cmd = m.filePathInput.Update(msg)
+					return m, cmd
+				}
+			}
 			switch msg.String() {
 			case "ctrl+c":
 				return m, tea.Quit
@@ -1207,8 +1275,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// First esc drops the staged attachment and leaves
 					// the draft text and reply context alone; a second
 					// esc then cancels composing as usual.
-					os.Remove(m.draftImagePath)
+					if m.draftFileOwned {
+						os.Remove(m.draftImagePath)
+					}
 					m.draftImagePath = ""
+					m.draftFileOwned = false
 					return m, nil
 				}
 				m.composing = false
@@ -1247,6 +1318,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, pasteImageCmd()
+			case "ctrl+t":
+				if m.openJID == "" {
+					return m, nil
+				}
+				m.attachingFile = true
+				m.filePathInput.Reset()
+				return m, m.filePathInput.Focus()
 			case "tab", "enter":
 				if m.mentionOpen {
 					if query, ok := activeMentionQuery(m.input.Value()); ok {
@@ -1267,16 +1345,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				replyTo := m.replyToID
-				path := m.draftImagePath
+				path, owned := m.draftImagePath, m.draftFileOwned
 				mentions := pendingMentionPhones(text)
 				m.input.Reset()
 				m.replyToID = ""
 				m.replyPreview = ""
 				m.draftImagePath = ""
+				m.draftFileOwned = false
 				// Stay in compose mode so the next message can be typed
 				// right away while this one sends in the background.
 				if path != "" {
-					return m, m.queueMediaSend(m.openJID, path, text, replyTo)
+					return m, m.queueMediaSend(m.openJID, path, text, replyTo, owned)
 				}
 				return m, m.queueSend(m.openJID, text, replyTo, mentions)
 			default:
@@ -1684,6 +1763,7 @@ func renderHelp(width, height int) string {
 		{"ctrl+n / ctrl+p", "next / previous chat (also while composing)"},
 		{"i", "compose a message"},
 		{"ctrl+v", "paste a clipboard image (while composing)"},
+		{"ctrl+t", "attach a file from this pc by path (while composing)"},
 		{"@", "mention a sender in this chat (tab/enter picks, ↑/↓ moves)"},
 		{"A", "mark all of this chat's messages as read"},
 		{"r", "reply to selected message"},
@@ -1896,6 +1976,9 @@ func (m model) sendBoxView() string {
 	// hint rows) so the message pane's height never shifts between states.
 	replyLine := "\n"
 	switch {
+	case m.composing && m.attachingFile:
+		m.filePathInput.Width = m.msgPaneWidth() - len(m.filePathInput.Prompt) - 1
+		replyLine = m.filePathInput.View() + "\n"
 	case m.composing && m.mentionOpen:
 		query, _ := activeMentionQuery(m.input.Value())
 		replyLine = renderMentionRow(mentionCandidatesFor(m.openMsgs, query), m.mentionSel) + "\n"
@@ -1910,7 +1993,9 @@ func (m model) sendBoxView() string {
 			parts = append(parts, label+" "+preview)
 		}
 		if m.draftImagePath != "" {
-			parts = append(parts, lipgloss.NewStyle().Foreground(rcFg).Render("📎 image attached (esc to remove)"))
+			attached := lipgloss.NewStyle().Foreground(rcFg).
+				Render(fmt.Sprintf("📎 %s attached (esc to remove)", filepath.Base(m.draftImagePath)))
+			parts = append(parts, attached)
 		}
 		replyLine = strings.Join(parts, "   ") + "\n"
 	}
