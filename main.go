@@ -961,6 +961,18 @@ func (m *model) markUnread(msgs []Message) {
 	}
 }
 
+// oldestUnreadIndex returns the index of the first (oldest) message in
+// msgs, which is ordered oldest-first, that's marked unread, or -1 if none
+// is.
+func oldestUnreadIndex(msgs []Message, unread map[string]bool) int {
+	for i, m := range msgs {
+		if unread[m.MsgID] {
+			return i
+		}
+	}
+	return -1
+}
+
 // rebuildContent re-renders the open chat's messages, highlighting the
 // currently selected message.
 func (m *model) rebuildContent() {
@@ -1232,7 +1244,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Follow the newest message across refreshes only if the user
 		// hadn't scrolled back to read older ones.
-		wasAtNewest := m.selectedMsg < 0 || m.selectedMsg >= len(m.openMsgs)-1
+		firstLoad := m.selectedMsg < 0
+		wasAtNewest := firstLoad || m.selectedMsg >= len(m.openMsgs)-1
 		m.markUnread(msg.msgs)
 		if msg.msgs == nil {
 			msg.msgs = []Message{}
@@ -1241,7 +1254,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reactors = msg.reactors
 		m.dropDoneSends(msg.jid, msg.msgs)
 		m.mergePending()
-		if wasAtNewest || m.selectedMsg >= len(m.openMsgs) {
+		switch {
+		case firstLoad:
+			// Land on the oldest unread message, the way WhatsApp itself
+			// opens a chat, so unread text isn't skipped past; with
+			// nothing unread, fall back to the newest message as before.
+			if idx := oldestUnreadIndex(m.openMsgs, m.unread); idx >= 0 {
+				m.selectedMsg = idx
+			} else {
+				m.selectedMsg = len(m.openMsgs) - 1
+			}
+		case wasAtNewest || m.selectedMsg >= len(m.openMsgs):
 			m.selectedMsg = len(m.openMsgs) - 1
 		}
 		m.rebuildContent()
