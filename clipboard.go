@@ -31,3 +31,17 @@ func clipboardImage() (string, error) {
 	}
 	return path, nil
 }
+
+// copyToClipboard writes s to the system clipboard via pbcopy.
+func copyToClipboard(s string) error {
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = strings.NewReader(s)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
+}
