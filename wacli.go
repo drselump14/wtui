@@ -233,18 +233,22 @@ type mentionResolution struct {
 }
 
 // resolveMentionNames maps each @mention ID in ids (bare digits, either a
-// LID or an older-style phone number) to its contact's saved name, via
-// wacli's local LID map. IDs wacli can't resolve, or resolves but has no
+// LID or an older-style phone number — the two are indistinguishable from
+// the digits alone) to its contact's saved name, via wacli's local LID
+// map. wacli's "contacts resolve" needs an explicit "@lid" suffix to try
+// the LID interpretation of a bare digit string (it otherwise assumes
+// phone), so each id is tried both ways and whichever resolves wins. IDs
+// wacli can't resolve under either interpretation, or resolves but has no
 // saved name for, are simply omitted from the result — the caller falls
 // back to showing the raw ID for those.
 func resolveMentionNames(ids []string) (map[string]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := make([]string, 0, len(ids)+2)
+	args := make([]string, 0, len(ids)*2+2)
 	args = append(args, "contacts", "resolve")
 	for _, id := range ids {
-		args = append(args, id+"@lid")
+		args = append(args, id, id+"@lid")
 	}
 	var env envelope[[]mentionResolution]
 	if err := runWacli(&env, args...); err != nil {
@@ -258,11 +262,7 @@ func resolveMentionNames(ids []string) (map[string]string, error) {
 		if r.Name == "" {
 			continue
 		}
-		id := strings.TrimSuffix(r.LID, "@lid")
-		if id == "" {
-			id = strings.TrimSuffix(r.Input, "@lid")
-		}
-		names[id] = r.Name
+		names[strings.TrimSuffix(r.Input, "@lid")] = r.Name
 	}
 	return names, nil
 }
