@@ -32,6 +32,7 @@ type Message struct {
 	FromMe       bool   `json:"FromMe"`
 	DisplayText  string `json:"DisplayText"`
 	MediaType    string `json:"MediaType"`
+	MediaCaption string `json:"MediaCaption"`
 	Revoked      bool   `json:"Revoked"`
 	DeletedForMe bool   `json:"DeletedForMe"`
 	QuotedMsgID  string `json:"quoted_msg_id"`

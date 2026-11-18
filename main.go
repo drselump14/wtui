@@ -1927,6 +1927,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.delConfirmOnlyForMe = !sel.FromMe
 			}
 			return m, nil
+		case "y":
+			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
+				id := m.openMsgs[m.selectedMsg].MsgID
+				if err := copyToClipboard(id); err != nil {
+					m.err = "copy message id: " + err.Error()
+				} else {
+					m.err = "copied message id: " + id
+				}
+			}
+			return m, nil
 		case "E":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				if entries := m.reactors[m.openMsgs[m.selectedMsg].MsgID]; len(entries) > 0 {
@@ -2025,6 +2035,7 @@ func renderHelp(width, height int) string {
 		{"o", "open media or link"},
 		{"R / x", "retry / discard a failed send"},
 		{"d", "delete selected message (for me, or for everyone if it's yours)"},
+		{"y", "copy selected message's id to clipboard (debugging)"},
 		{"/", "search messages in this chat"},
 		{"n / p", "next / previous search match"},
 		{"ctrl+/", "toggle chat list search"},
@@ -2606,6 +2617,21 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 		}
 
 		text := msg.DisplayText
+		if msg.MediaType != "" && msg.MediaCaption != "" {
+			// wacli's DisplayText for a media message is a generic "Sent
+			// <type>" label, not the caption the sender actually typed;
+			// the real caption lives in MediaCaption. Swap it in, keeping
+			// any "> quoted\n" reply header DisplayText already built.
+			if strings.HasPrefix(text, "> ") {
+				if nl := strings.Index(text, "\n"); nl >= 0 {
+					text = text[:nl+1] + msg.MediaCaption
+				} else {
+					text = msg.MediaCaption
+				}
+			} else {
+				text = msg.MediaCaption
+			}
+		}
 		textColor := rcFg
 		if msg.Revoked {
 			text, textColor = "[deleted]", rcRed
