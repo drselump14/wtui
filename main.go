@@ -124,6 +124,7 @@ type model struct {
 	width     int
 	height    int
 	err       string
+	notice    string // non-error info popup (e.g. "copied message id: …"); same dismiss gesture as err, styled differently
 	ready     bool
 	lastKey   string // tracks "g" for the "gg" (goto top) motion
 	showHelp  bool   // true while the full-screen "?" keybinding help is shown
@@ -1194,7 +1195,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatsLoadedMsg:
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 			return m, nil
 		}
 		m.err = ""
@@ -1232,7 +1233,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale response from a chat we've since left
 		}
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 			return m, nil
 		}
 		m.err = ""
@@ -1282,7 +1283,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		e.loading = false
 		if msg.err != nil {
-			e.err = msg.err.Error()
+			e.err = logErr(msg.err)
 		} else {
 			e.png = msg.png
 			e.w, e.h = msg.w, msg.h
@@ -1291,7 +1292,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatMarkedReadMsg:
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 		}
 		return m, nil
 
@@ -1303,7 +1304,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 			return m, nil
 		}
 		return m, loadMessages(m.openJID, m.mentionNames)
@@ -1316,7 +1317,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 			return m, nil
 		}
 		return m, loadMessages(m.openJID, m.mentionNames)
@@ -1335,7 +1336,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case editorDoneMsg:
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 			return m, m.input.Focus()
 		}
 		m.err = ""
@@ -1345,7 +1346,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pastedImageMsg:
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 			return m, m.input.Focus()
 		}
 		m.err = ""
@@ -1358,7 +1359,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case filePickedMsg:
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 			return m, m.input.Focus()
 		}
 		if msg.path == "" {
@@ -1366,7 +1367,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		path := expandUserPath(msg.path)
 		if info, serr := os.Stat(path); serr != nil {
-			m.err = serr.Error()
+			m.err = logErr(serr)
 			return m, m.input.Focus()
 		} else if info.IsDir() {
 			m.err = "can't attach a directory"
@@ -1382,7 +1383,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case videoResultMsg:
 		m.videoLoading = false
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 		}
 		return m, nil
 
@@ -1395,17 +1396,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case enlargeResultMsg:
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			m.err = logErr(msg.err)
 		}
 		return m, nil
 
 	case tea.KeyMsg:
-		// An error popup swallows the next key to dismiss it.
-		if m.err != "" {
+		// An error or notice popup swallows the next key to dismiss it.
+		if m.err != "" || m.notice != "" {
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
 			}
 			m.err = ""
+			m.notice = ""
 			return m, nil
 		}
 		if m.showHelp {
@@ -1952,11 +1954,24 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "y":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
+				sel := m.openMsgs[m.selectedMsg]
+				text := captionAwareText(sel)
+				if text == "" {
+					m.err = "nothing to copy: message has no text"
+				} else if err := copyToClipboard(text); err != nil {
+					m.err = logErr(fmt.Errorf("copy message text: %w", err))
+				} else {
+					m.notice = "copied message text"
+				}
+			}
+			return m, nil
+		case "Y":
+			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				id := m.openMsgs[m.selectedMsg].MsgID
 				if err := copyToClipboard(id); err != nil {
-					m.err = "copy message id: " + err.Error()
+					m.err = logErr(fmt.Errorf("copy message id: %w", err))
 				} else {
-					m.err = "copied message id: " + id
+					m.notice = "copied message id: " + id
 				}
 			}
 			return m, nil
@@ -2058,7 +2073,8 @@ func renderHelp(width, height int) string {
 		{"o", "open media or link"},
 		{"R / x", "retry / discard a failed send"},
 		{"d", "delete selected message (for me, or for everyone if it's yours)"},
-		{"y", "copy selected message's id to clipboard (debugging)"},
+		{"y", "copy selected message's text to clipboard"},
+		{"Y", "copy selected message's id to clipboard (debugging)"},
 		{"/", "search messages in this chat"},
 		{"n / p", "next / previous search match"},
 		{"ctrl+/", "toggle chat list search"},
@@ -2180,8 +2196,8 @@ func (m model) View() string {
 	// One row only: a wrapped footer would push the layout (and the inline
 	// image's absolute position) down a line.
 	footer = ansi.Truncate(footer, m.width, "…")
-	if m.err != "" {
-		// Drop the inline image so it isn't drawn over the error popup.
+	if m.err != "" || m.notice != "" {
+		// Drop the inline image so it isn't drawn over the popup.
 		if kittySupported() {
 			footer += kittyDeleteImage(1)
 		}
@@ -2192,26 +2208,29 @@ func (m model) View() string {
 
 	screen := body + "\n" + taskLine + "\n" + footerStyle.Render(footer)
 	if m.err != "" {
-		screen = overlayCenter(screen, m.renderErrorPopup(), m.width, m.height)
+		screen = overlayCenter(screen, m.renderPopup(m.err, "error", rcRed), m.width, m.height)
+	} else if m.notice != "" {
+		screen = overlayCenter(screen, m.renderPopup(m.notice, "notice", rcGreen), m.width, m.height)
 	}
 	return screen
 }
 
-// renderErrorPopup renders m.err as a red-bordered box for overlayCenter.
-func (m model) renderErrorPopup() string {
+// renderPopup renders msg as a bordered box for overlayCenter, titled and
+// colored by accent (red for m.err, green for m.notice).
+func (m model) renderPopup(msg, title string, accent lipgloss.Color) string {
 	maxW := m.width * 2 / 3
 	if maxW < 20 {
 		maxW = m.width - 4
 	}
-	text := lipgloss.NewStyle().Foreground(rcFg).Width(min(lipgloss.Width(m.err), maxW)).Render(m.err)
-	title := lipgloss.NewStyle().Bold(true).Foreground(rcRed).Render("error")
+	text := lipgloss.NewStyle().Foreground(rcFg).Width(min(lipgloss.Width(msg), maxW)).Render(msg)
+	titleStyled := lipgloss.NewStyle().Bold(true).Foreground(accent).Render(title)
 	hint := lipgloss.NewStyle().Foreground(rcDim).Render("press any key to close")
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(rcRed).
+		BorderForeground(accent).
 		Background(rcBg).
 		Padding(1, 2).
-		Render(title + "\n\n" + text + "\n\n" + hint)
+		Render(titleStyled + "\n\n" + text + "\n\n" + hint)
 }
 
 // overlayCenter draws fg centered on top of bg (both multi-line, possibly
@@ -2546,6 +2565,22 @@ func renderChatList(chats []Chat, cursor int, openJID string, focused bool, widt
 // pane — see imagePaneEscapes. lineStart[i] is the first content line of
 // msgs[i] (lineStart[len(msgs)] is the total line count), used to scroll a
 // selection fully into view.
+// captionAwareText returns a message's body text, preferring MediaCaption
+// over wacli's generic "Sent <type>" DisplayText for media messages, while
+// keeping any "> quoted\n" reply header DisplayText already built.
+func captionAwareText(msg Message) string {
+	text := msg.DisplayText
+	if msg.MediaType == "" || msg.MediaCaption == "" {
+		return text
+	}
+	if strings.HasPrefix(text, "> ") {
+		if nl := strings.Index(text, "\n"); nl >= 0 {
+			return text[:nl+1] + msg.MediaCaption
+		}
+	}
+	return msg.MediaCaption
+}
+
 func renderMessages(msgs []Message, width int, selectedIdx int, unread map[string]bool, status map[string]sendLabel, reactors map[string][]reactionDetail) (string, []int) {
 	if len(msgs) == 0 {
 		return lipgloss.NewStyle().Faint(true).Render("no messages"), nil
@@ -2639,22 +2674,7 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 			}
 		}
 
-		text := msg.DisplayText
-		if msg.MediaType != "" && msg.MediaCaption != "" {
-			// wacli's DisplayText for a media message is a generic "Sent
-			// <type>" label, not the caption the sender actually typed;
-			// the real caption lives in MediaCaption. Swap it in, keeping
-			// any "> quoted\n" reply header DisplayText already built.
-			if strings.HasPrefix(text, "> ") {
-				if nl := strings.Index(text, "\n"); nl >= 0 {
-					text = text[:nl+1] + msg.MediaCaption
-				} else {
-					text = msg.MediaCaption
-				}
-			} else {
-				text = msg.MediaCaption
-			}
-		}
+		text := captionAwareText(msg)
 		textColor := rcFg
 		if msg.Revoked {
 			text, textColor = "[deleted]", rcRed

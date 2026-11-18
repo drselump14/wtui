@@ -36,3 +36,13 @@ func initLogging() *os.File {
 	appLog = log.New(f, "", log.LstdFlags)
 	return f
 }
+
+// logErr records err to appLog (a no-op if logging never initialized) and
+// returns its message, so a failure that surfaces in the UI as m.err is
+// also captured in ~/.wtui.log for debugging after the TUI has moved on.
+func logErr(err error) string {
+	if appLog != nil {
+		appLog.Printf("ui error: %v", err)
+	}
+	return err.Error()
+}
