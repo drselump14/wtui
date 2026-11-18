@@ -174,11 +174,17 @@ func (m *model) finishSend(msg pendingSentMsg) tea.Cmd {
 func (m *model) dropDoneSends(jid string, loaded []Message) {
 	claimed := map[int]bool{}
 	found := func(p pendingSend) bool {
+		// loaded's DisplayText has already had its @mentions expanded from
+		// raw digits to names (loadMessages), but p.text is still exactly
+		// what the user typed; expand it the same way before comparing, or
+		// a resolved mention makes this never match and the placeholder
+		// (still showing raw digits) lingers as a duplicate forever.
+		text := expandMentions(p.text, m.mentionNames)
 		for i := len(loaded) - 1; i >= 0; i-- {
 			msg := loaded[i]
 			// For replies wacli prefixes DisplayText with the quoted
 			// text ("> quoted\nreply"), so match on the trailing part.
-			sameText := msg.DisplayText == p.text || strings.HasSuffix(msg.DisplayText, "\n"+p.text)
+			sameText := msg.DisplayText == text || strings.HasSuffix(msg.DisplayText, "\n"+text)
 			sameKind := p.isMedia() == (msg.MediaType != "")
 			if claimed[i] || !msg.FromMe || !sameText || !sameKind {
 				continue
