@@ -1255,13 +1255,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reactors = msg.reactors
 		m.dropDoneSends(msg.jid, msg.msgs)
 		m.mergePending()
+		landedOnUnread := false
 		switch {
 		case firstLoad:
-			// Land on the oldest unread message, the way WhatsApp itself
-			// opens a chat, so unread text isn't skipped past; with
+			// Cursor lands on the oldest unread message, the way WhatsApp
+			// itself opens a chat, so unread text isn't skipped past; with
 			// nothing unread, fall back to the newest message as before.
 			if idx := oldestUnreadIndex(m.openMsgs, m.unread); idx >= 0 {
 				m.selectedMsg = idx
+				landedOnUnread = true
 			} else {
 				m.selectedMsg = len(m.openMsgs) - 1
 			}
@@ -1269,7 +1271,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedMsg = len(m.openMsgs) - 1
 		}
 		m.rebuildContent()
-		m.scrollToSelection()
+		if landedOnUnread {
+			// Scroll to the newest message so the chat still opens showing
+			// what's current; the cursor stays on the oldest unread message
+			// until the user moves it, at which point scrollToSelection
+			// takes over as normal.
+			m.viewport.GotoBottom()
+		} else {
+			m.scrollToSelection()
+		}
 		return m, m.loadSelectedImage()
 
 	case imageLoadedMsg:
