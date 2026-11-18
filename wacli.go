@@ -179,6 +179,25 @@ func sendReact(chatJID, msgID, senderJID, emoji string) error {
 	return nil
 }
 
+// deleteMessage removes msgID in chatJID: for everyone (wacli's "delete"
+// without --for-me, which only works for a message FromMe) or, with forMe
+// true, just from this account's own local view (any message, revoked or
+// not, is removed locally either way).
+func deleteMessage(chatJID, msgID string, forMe bool) error {
+	args := []string{"messages", "delete", "--chat", chatJID, "--id", msgID}
+	if forMe {
+		args = append(args, "--for-me")
+	}
+	var env envelope[any]
+	if err := runWacli(&env, args...); err != nil {
+		return err
+	}
+	if !env.Success {
+		return fmt.Errorf("wacli: %s", deref(env.Error))
+	}
+	return nil
+}
+
 type mentionResolution struct {
 	Input    string `json:"input"`
 	LID      string `json:"lid"`

@@ -232,7 +232,7 @@ func (m model) sendsActive() bool {
 			return true
 		}
 	}
-	return len(m.reactSends) > 0
+	return len(m.reactSends) > 0 || len(m.delSends) > 0
 }
 
 // mergePending rebuilds openMsgs as the loaded server messages followed
@@ -308,20 +308,28 @@ func (m model) bgTaskSummary() string {
 		}
 	}
 	reacts := len(m.reactSends)
-	if msgs == 0 && files == 0 && reacts == 0 {
+	dels := len(m.delSends)
+	if msgs == 0 && files == 0 && reacts == 0 && dels == 0 {
 		return ""
 	}
-	var parts []string
+	var sending []string
 	if msgs > 0 {
-		parts = append(parts, pluralize(msgs, "message"))
+		sending = append(sending, pluralize(msgs, "message"))
 	}
 	if reacts > 0 {
-		parts = append(parts, pluralize(reacts, "reaction"))
+		sending = append(sending, pluralize(reacts, "reaction"))
 	}
 	if files > 0 {
-		parts = append(parts, pluralize(files, "file"))
+		sending = append(sending, pluralize(files, "file"))
 	}
-	return spinnerFrames[m.sendFrame] + " sending " + strings.Join(parts, ", ") + "…"
+	var clauses []string
+	if len(sending) > 0 {
+		clauses = append(clauses, "sending "+strings.Join(sending, ", "))
+	}
+	if dels > 0 {
+		clauses = append(clauses, "deleting "+pluralize(dels, "message"))
+	}
+	return spinnerFrames[m.sendFrame] + " " + strings.Join(clauses, "; ") + "…"
 }
 
 func pluralize(n int, noun string) string {

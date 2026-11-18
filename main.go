@@ -164,6 +164,13 @@ type model struct {
 	reactSends []reactSend // reactions sent but not yet confirmed by wacli; drives the background-task section
 	reactSeq   int         // counter for reactSend ids
 
+	delConfirmOpen      bool   // true while the "d" delete-confirmation prompt is showing
+	delConfirmTarget    string // MsgID being considered for deletion
+	delConfirmOnlyForMe bool   // true if the target isn't ours, so only "delete for me" is offered
+
+	delSends []int // ids of in-flight deletes, not yet confirmed by wacli; drives the background-task section
+	delSeq   int   // counter for delSends ids
+
 	reactors map[string][]reactionDetail // target MsgID → who reacted with what; also drives the chip row under a message
 
 	showReactors   bool         // true while the "E" who-reacted popup is shown
@@ -393,6 +400,31 @@ func (m model) sendReaction(id int, targetID, emoji string) tea.Cmd {
 	return func() tea.Msg {
 		return reactSentMsg{id: id, err: sendReact(jid, targetID, senderJID, emoji)}
 	}
+}
+
+type deleteSentMsg struct {
+	id  int
+	err error
+}
+
+// confirmDelete issues the delete for m.delConfirmTarget (forMe: local-only,
+// safe for any message; else for everyone, which only works for one of our
+// own) and closes the prompt, kicking off the send spinner if it isn't
+// already running.
+func (m model) confirmDelete(forMe bool) (model, tea.Cmd) {
+	jid, id := m.openJID, m.delConfirmTarget
+	m.delConfirmOpen = false
+	m.delSeq++
+	seq := m.delSeq
+	m.delSends = append(m.delSends, seq)
+	cmd := func() tea.Msg {
+		return deleteSentMsg{id: seq, err: deleteMessage(jid, id, forMe)}
+	}
+	if !m.sendTicking {
+		m.sendTicking = true
+		return m, tea.Batch(cmd, sendTick())
+	}
+	return m, cmd
 }
 
 type chatMarkedReadMsg struct{ err error }
@@ -1249,6 +1281,19 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, loadMessages(m.openJID, m.mentionNames)
 
+	case deleteSentMsg:
+		for i, id := range m.delSends {
+			if id == msg.id {
+				m.delSends = append(m.delSends[:i], m.delSends[i+1:]...)
+				break
+			}
+		}
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			return m, nil
+		}
+		return m, loadMessages(m.openJID, m.mentionNames)
+
 	case pendingSentMsg:
 		return m, m.finishSend(msg)
 
@@ -1614,6 +1659,24 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.delConfirmOpen {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc", "n":
+				m.delConfirmOpen = false
+				return m, nil
+			case "1", "y":
+				return m.confirmDelete(true)
+			case "2":
+				if m.delConfirmOnlyForMe {
+					return m, nil // "for everyone" wasn't offered; ignore
+				}
+				return m.confirmDelete(false)
+			}
+			return m, nil
+		}
+
 		if m.reactOpen {
 			switch msg.String() {
 			case "ctrl+c":
@@ -1844,6 +1907,22 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.reactTarget = sel.MsgID
 			}
 			return m, nil
+		case "d":
+			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
+				sel := m.openMsgs[m.selectedMsg]
+				if isPendingID(sel.MsgID) {
+					m.err = "can't delete a message that hasn't been sent yet"
+					return m, nil
+				}
+				if sel.Revoked || sel.DeletedForMe {
+					m.err = "message already deleted"
+					return m, nil
+				}
+				m.delConfirmOpen = true
+				m.delConfirmTarget = sel.MsgID
+				m.delConfirmOnlyForMe = !sel.FromMe
+			}
+			return m, nil
 		case "E":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				if entries := m.reactors[m.openMsgs[m.selectedMsg].MsgID]; len(entries) > 0 {
@@ -1941,6 +2020,7 @@ func renderHelp(width, height int) string {
 		{"f", "jump to the message being replied to"},
 		{"o", "open media or link"},
 		{"R / x", "retry / discard a failed send"},
+		{"d", "delete selected message (for me, or for everyone if it's yours)"},
 		{"/", "search messages in this chat"},
 		{"n / p", "next / previous search match"},
 		{"ctrl+/", "toggle chat list search"},
@@ -2142,6 +2222,9 @@ func (m model) matchStatus() string {
 // message pane: the live textinput while composing, or a dim hint
 // otherwise.
 func (m model) sendBoxView() string {
+	if m.delConfirmOpen {
+		return renderDeleteConfirm(m.delConfirmOnlyForMe)
+	}
 	if m.reactOpen {
 		// Its own fixed-height block (see renderReactGrid) rather than a
 		// single replyLine row: the emoji grid can wrap to several lines.
@@ -2223,6 +2306,26 @@ func renderReactGrid(sel, width int) string {
 		lines = append(lines, row.String())
 	}
 	lines = append(lines, lipgloss.NewStyle().Foreground(rcDim).Render("←/→/↑/↓ pick · enter send · esc cancel"))
+	for len(lines) < totalLines {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:totalLines], "\n")
+}
+
+// renderDeleteConfirm draws the "d" delete-confirmation prompt: a question
+// line and a key hint, padded to exactly 1+composeRows lines like
+// renderReactGrid. onlyForMe omits the "for everyone" option when the
+// target message isn't ours.
+func renderDeleteConfirm(onlyForMe bool) string {
+	const totalLines = 1 + composeRows
+	hint := "1/y: delete for me   esc: cancel"
+	if !onlyForMe {
+		hint = "1: delete for me   2: delete for everyone   esc: cancel"
+	}
+	lines := []string{
+		lipgloss.NewStyle().Foreground(rcYellow).Render("delete this message?"),
+		lipgloss.NewStyle().Foreground(rcDim).Render(hint),
+	}
 	for len(lines) < totalLines {
 		lines = append(lines, "")
 	}
