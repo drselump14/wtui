@@ -67,6 +67,12 @@ func runWacli(out any, args ...string) error {
 			if appLog != nil {
 				appLog.Printf("wacli %v FAILED (%s): %s", args, dur, stderr)
 			}
+			if strings.Contains(stderr, "store is locked") || strings.Contains(stderr, "store lock") {
+				// messages delete/revoke and chats mark-read contend
+				// directly for the connection lock, unlike `send *`, which
+				// a running `sync --follow` delegates instead of blocking.
+				return fmt.Errorf("wacli %v: can't reach the store — wacli sync --follow is running and holds it; stop it, retry, then restart sync (%s)", args, stderr)
+			}
 			return fmt.Errorf("wacli %v: %s", args, stderr)
 		}
 		if appLog != nil {
