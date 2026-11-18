@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Chat mirrors a row from `wacli chats list --json`.
@@ -56,13 +57,25 @@ type messagesPage struct {
 
 func runWacli(out any, args ...string) error {
 	full := append([]string{"--json"}, args...)
+	start := time.Now()
 	cmd := exec.Command("wacli", full...)
 	stdout, err := cmd.Output()
+	dur := time.Since(start).Round(time.Millisecond)
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			return fmt.Errorf("wacli %v: %s", args, string(ee.Stderr))
+			stderr := strings.TrimSpace(string(ee.Stderr))
+			if appLog != nil {
+				appLog.Printf("wacli %v FAILED (%s): %s", args, dur, stderr)
+			}
+			return fmt.Errorf("wacli %v: %s", args, stderr)
+		}
+		if appLog != nil {
+			appLog.Printf("wacli %v FAILED (%s): %v (is wacli on PATH?)", args, dur, err)
 		}
 		return fmt.Errorf("wacli %v: %w (is wacli on PATH?)", args, err)
+	}
+	if appLog != nil {
+		appLog.Printf("wacli %v ok (%s)", args, dur)
 	}
 	return json.Unmarshal(stdout, out)
 }

@@ -2704,6 +2704,10 @@ func main() {
 	chatJID := flag.String("chat", "", "open directly into this chat (JID), e.g. from a dock/menu-bar widget")
 	flag.Parse()
 
+	if f := initLogging(); f != nil {
+		defer f.Close()
+	}
+
 	m := initialModel()
 	m.startJID = *chatJID
 	p := tea.NewProgram(m, tea.WithAltScreen())
