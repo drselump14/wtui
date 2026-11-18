@@ -1084,7 +1084,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // draft, not in the middle of earlier text.
 func textareaAtEnd(ta textarea.Model) bool {
 	li := ta.LineInfo()
-	return ta.Line() == ta.LineCount()-1 && li.CharOffset == li.CharWidth
+	// bubbles' textarea always pads a (wrapped) line's last segment with one
+	// synthetic trailing space, to place the cursor past the last real
+	// character — so CharWidth is always content width + 1, and the cursor
+	// at true end-of-content sits at CharWidth-1, never CharWidth itself.
+	return ta.Line() == ta.LineCount()-1 && li.CharOffset == li.CharWidth-1
 }
 
 // acceptMention replaces the in-progress "@query" at the end of the draft
