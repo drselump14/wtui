@@ -161,6 +161,9 @@ type model struct {
 	reactSel    int    // highlighted emoji in the reaction picker
 	reactTarget string // MsgID being reacted to; set when the picker opens
 
+	reactSends []reactSend // reactions sent but not yet confirmed by wacli; drives the background-task section
+	reactSeq   int         // counter for reactSend ids
+
 	reactors map[string][]reactionDetail // target MsgID → who reacted with what; also drives the chip row under a message
 
 	showReactors   bool         // true while the "E" who-reacted popup is shown
@@ -362,11 +365,23 @@ var reactionEmojis = []string{
 	"👎", "💯", "🤔", "😭",
 }
 
-type reactSentMsg struct{ err error }
+type reactSentMsg struct {
+	id  int
+	err error
+}
+
+// reactSend is a reaction sent but not yet confirmed by wacli, tracked only
+// so the background-task section can show "sending reaction…" while it's
+// in flight; wtui has no retry/discard UI for a failed one (the error
+// popup still covers that).
+type reactSend struct {
+	id    int
+	emoji string
+}
 
 // sendReaction reacts to targetID (in the open chat) with emoji, looking up
 // the message's original sender for wacli's group --sender requirement.
-func (m model) sendReaction(targetID, emoji string) tea.Cmd {
+func (m model) sendReaction(id int, targetID, emoji string) tea.Cmd {
 	jid := m.openJID
 	var senderJID string
 	for _, msg := range m.openMsgs {
@@ -376,7 +391,7 @@ func (m model) sendReaction(targetID, emoji string) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		return reactSentMsg{err: sendReact(jid, targetID, senderJID, emoji)}
+		return reactSentMsg{id: id, err: sendReact(jid, targetID, senderJID, emoji)}
 	}
 }
 
@@ -1107,7 +1122,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		vpW := m.msgPaneWidth()
-		vpH := m.height - 6 - composeRows // header + divider + reply-context line + send box rows, plus borders/footer
+		vpH := m.height - 7 - composeRows // header + divider + reply-context line + send box rows, plus borders/footer/task-section
 		if vpH < 3 {
 			vpH = 3
 		}
@@ -1222,6 +1237,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case reactSentMsg:
+		for i, r := range m.reactSends {
+			if r.id == msg.id {
+				m.reactSends = append(m.reactSends[:i], m.reactSends[i+1:]...)
+				break
+			}
+		}
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			return m, nil
@@ -1618,7 +1639,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "enter":
 				m.reactOpen = false
-				return m, m.sendReaction(m.reactTarget, reactionEmojis[m.reactSel])
+				emoji := reactionEmojis[m.reactSel]
+				m.reactSeq++
+				id := m.reactSeq
+				m.reactSends = append(m.reactSends, reactSend{id: id, emoji: emoji})
+				cmd := m.sendReaction(id, m.reactTarget, emoji)
+				if !m.sendTicking {
+					m.sendTicking = true
+					cmd = tea.Batch(cmd, sendTick())
+				}
+				return m, cmd
 			}
 			return m, nil
 		}
@@ -1660,7 +1690,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadSelectedImage()
 		case "ctrl+d":
 			if m.focusList {
-				m.cursor += (m.height - 3) / 2
+				m.cursor += (m.height - 4) / 2
 				if n := len(m.visibleChats()); m.cursor > n-1 {
 					m.cursor = n - 1
 				}
@@ -1670,7 +1700,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+u":
 			if m.focusList {
-				m.cursor -= (m.height - 3) / 2
+				m.cursor -= (m.height - 4) / 2
 				if m.cursor < 0 {
 					m.cursor = 0
 				}
@@ -1994,17 +2024,23 @@ func (m model) View() string {
 		return renderHelp(m.width, m.height)
 	}
 
-	listPane := renderChatList(m.visibleChats(), m.cursor, m.openJID, m.focusList, listWidth, m.height-3, m.listBottomLine())
+	listPane := renderChatList(m.visibleChats(), m.cursor, m.openJID, m.focusList, listWidth, m.height-4, m.listBottomLine())
 
 	msgPane := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor(!m.focusList)).
 		Background(rcBg).
 		Width(m.msgPaneWidth()).
-		Height(m.height - 3).
+		Height(m.height - 4).
 		Render(m.headerFor(m.openJID) + "\n" + m.titleDivider() + "\n" + m.viewport.View() + "\n" + m.sendBoxView())
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, listPane, msgPane)
+
+	// Background-task section: one row, always reserved so the layout
+	// never shifts when a send/reaction starts or finishes; blank when
+	// nothing is in flight.
+	taskLine := ansi.Truncate(m.bgTaskSummary(), m.width, "…")
+	taskLine = lipgloss.NewStyle().Foreground(rcYellow).Width(m.width).Render(taskLine)
 
 	footer := "?: help  q: quit"
 	if m.composing {
@@ -2036,7 +2072,7 @@ func (m model) View() string {
 	}
 	footerStyle := lipgloss.NewStyle().Foreground(rcDim).Width(m.width)
 
-	screen := body + "\n" + footerStyle.Render(footer)
+	screen := body + "\n" + taskLine + "\n" + footerStyle.Render(footer)
 	if m.err != "" {
 		screen = overlayCenter(screen, m.renderErrorPopup(), m.width, m.height)
 	}

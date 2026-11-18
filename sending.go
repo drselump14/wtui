@@ -232,7 +232,7 @@ func (m model) sendsActive() bool {
 			return true
 		}
 	}
-	return false
+	return len(m.reactSends) > 0
 }
 
 // mergePending rebuilds openMsgs as the loaded server messages followed
@@ -290,4 +290,43 @@ func (m model) sendStatusLabels() map[string]sendLabel {
 type sendLabel struct {
 	text   string
 	failed bool
+}
+
+// bgTaskSummary is the background-task section's one-line progress
+// summary of in-flight message/file sends and reactions, or "" when
+// nothing is in flight.
+func (m model) bgTaskSummary() string {
+	var msgs, files int
+	for _, p := range m.pending {
+		if p.state != sendQueued && p.state != sendInFlight {
+			continue
+		}
+		if p.isMedia() {
+			files++
+		} else {
+			msgs++
+		}
+	}
+	reacts := len(m.reactSends)
+	if msgs == 0 && files == 0 && reacts == 0 {
+		return ""
+	}
+	var parts []string
+	if msgs > 0 {
+		parts = append(parts, pluralize(msgs, "message"))
+	}
+	if reacts > 0 {
+		parts = append(parts, pluralize(reacts, "reaction"))
+	}
+	if files > 0 {
+		parts = append(parts, pluralize(files, "file"))
+	}
+	return spinnerFrames[m.sendFrame] + " sending " + strings.Join(parts, ", ") + "…"
+}
+
+func pluralize(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
