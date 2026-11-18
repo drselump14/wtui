@@ -104,11 +104,19 @@ func fetchMessages(chatJID string, limit int) ([]Message, error) {
 	return msgs, nil
 }
 
+// writeLockWait is passed as --lock-wait on every write command (send,
+// react, delete, mark-read) so a second one issued while another is still
+// holding the store lock (e.g. a reaction fired while a file send is
+// writing, or a delete racing the periodic reload) waits its turn instead
+// of failing immediately with a lock error — wacli's own default for
+// --lock-wait is 0, i.e. no wait.
+const writeLockWait = "5s"
+
 // markChatRead marks chatJID as read, sending real read receipts for its
 // synced unread messages (per wacli's own read-receipt privacy setting).
 func markChatRead(chatJID string) error {
 	var env envelope[any]
-	if err := runWacli(&env, "chats", "mark-read", "--chat", chatJID, "--receipts"); err != nil {
+	if err := runWacli(&env, "chats", "mark-read", "--chat", chatJID, "--receipts", "--lock-wait", writeLockWait); err != nil {
 		return err
 	}
 	if !env.Success {
@@ -122,7 +130,7 @@ func markChatRead(chatJID string) error {
 // is the phone numbers embedded as "@<phone>" tokens in text, passed
 // through so WhatsApp actually tags and notifies them.
 func sendText(chatJID, text, replyTo string, mentions []string) error {
-	args := []string{"send", "text", "--to", chatJID, "--message", text}
+	args := []string{"send", "text", "--to", chatJID, "--message", text, "--lock-wait", writeLockWait}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
 	}
@@ -144,7 +152,7 @@ func sendText(chatJID, text, replyTo string, mentions []string) error {
 // as the media's caption; if replyTo is non-empty, the message is sent as
 // a quoted reply to that MsgID.
 func sendFile(chatJID, path, caption, replyTo string) error {
-	args := []string{"send", "file", "--to", chatJID, "--file", path}
+	args := []string{"send", "file", "--to", chatJID, "--file", path, "--lock-wait", writeLockWait}
 	if caption != "" {
 		args = append(args, "--caption", caption)
 	}
@@ -165,7 +173,7 @@ func sendFile(chatJID, path, caption, replyTo string) error {
 // chatJID. senderJID is the target message's original sender and is
 // required by wacli for group chats; it's ignored for 1:1 chats.
 func sendReact(chatJID, msgID, senderJID, emoji string) error {
-	args := []string{"send", "react", "--to", chatJID, "--id", msgID, "--reaction", emoji}
+	args := []string{"send", "react", "--to", chatJID, "--id", msgID, "--reaction", emoji, "--lock-wait", writeLockWait}
 	if senderJID != "" {
 		args = append(args, "--sender", senderJID)
 	}
@@ -184,7 +192,7 @@ func sendReact(chatJID, msgID, senderJID, emoji string) error {
 // true, just from this account's own local view (any message, revoked or
 // not, is removed locally either way).
 func deleteMessage(chatJID, msgID string, forMe bool) error {
-	args := []string{"messages", "delete", "--chat", chatJID, "--id", msgID}
+	args := []string{"messages", "delete", "--chat", chatJID, "--id", msgID, "--lock-wait", writeLockWait}
 	if forMe {
 		args = append(args, "--for-me")
 	}
