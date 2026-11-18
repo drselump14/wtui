@@ -21,6 +21,13 @@ type Chat struct {
 	UnreadCount   int    `json:"unread_count"`
 }
 
+// Muted reports whether the chat is currently muted: wacli uses -1 for a
+// forever mute and a future unix-seconds timestamp for a timed one (0, or a
+// past timestamp from an expired mute, means not muted).
+func (c Chat) Muted() bool {
+	return c.MutedUntil == -1 || c.MutedUntil > time.Now().Unix()
+}
+
 // Message mirrors a row from `wacli messages list --json`.
 type Message struct {
 	ChatJID      string `json:"ChatJID"`

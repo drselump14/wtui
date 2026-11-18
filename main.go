@@ -2673,6 +2673,11 @@ func renderChatList(chats []Chat, cursor int, openJID string, focused bool, widt
 		switch {
 		case mentioned:
 			style = style.Foreground(rcRed)
+		case c.UnreadCount > 0 && c.Muted():
+			// A muted chat's unread count stays unaccented (dim) rather
+			// than the usual yellow, so it doesn't compete for attention
+			// with chats the user hasn't muted.
+			style = style.Foreground(rcDim)
 		case c.UnreadCount > 0:
 			style = style.Foreground(rcYellow)
 		}
