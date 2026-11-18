@@ -52,6 +52,22 @@ type chatsLoadedMsg struct {
 	err   error
 }
 
+// ownMentionIDsMsg carries the signed-in account's own @mention digits,
+// fetched once at startup.
+type ownMentionIDsMsg struct {
+	ids map[string]bool
+	err error
+}
+
+// mentionsCheckedMsg reports, for each chat whose unread messages were just
+// scanned for a self-mention, whether one was found (mentioned) and the
+// UnreadCount that was scanned (seen), so the caller can cache it and skip
+// rescanning an unchanged chat on the next refresh.
+type mentionsCheckedMsg struct {
+	mentioned map[string]bool
+	seen      map[string]int
+}
+
 type messagesLoadedMsg struct {
 	jid      string
 	msgs     []Message
@@ -199,6 +215,19 @@ type model struct {
 	videoLoading bool   // true while "o" is downloading media to open
 	loadingLabel string // what is downloading, shown next to the spinner
 	videoFrame   int    // spinner frame for the downloading indicator
+
+	// ownMentionIDs holds the signed-in account's own @mention digits (its
+	// phone number and, separately, its LID), fetched once at startup. A
+	// mention token embeds whichever of the two the sender's client used,
+	// so both are checked.
+	ownMentionIDs map[string]bool
+
+	// mentionedChats marks, for the chat list badge, chats whose unread
+	// messages include an @mention of ownMentionIDs. lastUnreadSeen caches
+	// the UnreadCount last checked per chat, so an unchanged unread count
+	// isn't re-fetched and rescanned on every refresh tick.
+	mentionedChats map[string]bool
+	lastUnreadSeen map[string]int
 }
 
 func initialModel() model {
@@ -230,13 +259,15 @@ func initialModel() model {
 	filePathInput.CharLimit = 1024
 
 	return model{
-		focusList:     false,
-		ready:         false,
-		selectedMsg:   -1,
-		imgCache:      map[string]*imgEntry{},
-		input:         ti,
-		search:        search,
-		filePathInput: filePathInput,
+		focusList:      false,
+		ready:          false,
+		selectedMsg:    -1,
+		imgCache:       map[string]*imgEntry{},
+		input:          ti,
+		search:         search,
+		filePathInput:  filePathInput,
+		mentionedChats: map[string]bool{},
+		lastUnreadSeen: map[string]int{},
 	}
 }
 
@@ -257,7 +288,7 @@ func (m model) visibleChats() []Chat {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadChats(), tick())
+	return tea.Batch(loadChats(), tick(), loadOwnMentionIDs())
 }
 
 func tick() tea.Cmd {
@@ -268,6 +299,56 @@ func loadChats() tea.Cmd {
 	return func() tea.Msg {
 		chats, err := fetchChats()
 		return chatsLoadedMsg{chats: chats, err: err}
+	}
+}
+
+// loadOwnMentionIDs fetches the signed-in account's own @mention digits
+// once at startup, so the chat list can tell a mention of "me" apart from
+// an ordinary unread message.
+func loadOwnMentionIDs() tea.Cmd {
+	return func() tea.Msg {
+		ids, err := fetchOwnMentionIDs()
+		return ownMentionIDsMsg{ids: ids, err: err}
+	}
+}
+
+// checkMentions scans each of toCheck's unread messages (at most its
+// UnreadCount, capped) for an @mention of one of ownIDs, run off the main
+// thread like the rest of wtui's wacli calls. A chat that errors is simply
+// left out of the result, so the next refresh retries it (lastUnreadSeen
+// isn't advanced for it).
+func checkMentions(toCheck map[string]int, ownIDs map[string]bool) tea.Cmd {
+	return func() tea.Msg {
+		mentioned := map[string]bool{}
+		seen := map[string]int{}
+		for jid, unread := range toCheck {
+			limit := unread
+			if limit > 100 {
+				limit = 100
+			}
+			msgs, err := fetchMessages(jid, limit)
+			if err != nil {
+				continue
+			}
+			found := false
+			for _, msg := range msgs {
+				if msg.FromMe {
+					continue
+				}
+				for _, id := range mentionIDs(msg.DisplayText, nil) {
+					if ownIDs[id] {
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+			mentioned[jid] = found
+			seen[jid] = unread
+		}
+		return mentionsCheckedMsg{mentioned: mentioned, seen: seen}
 	}
 }
 
@@ -1200,6 +1281,25 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = ""
 		m.chats = msg.chats
+
+		// Re-scan only chats whose unread count changed since last checked,
+		// and drop the mention flag for chats that are no longer unread.
+		toCheck := map[string]int{}
+		for _, c := range m.chats {
+			if c.UnreadCount == 0 {
+				delete(m.mentionedChats, c.JID)
+				delete(m.lastUnreadSeen, c.JID)
+				continue
+			}
+			if m.lastUnreadSeen[c.JID] != c.UnreadCount {
+				toCheck[c.JID] = c.UnreadCount
+			}
+		}
+		var mentionCmd tea.Cmd
+		if len(toCheck) > 0 && m.ownMentionIDs != nil {
+			mentionCmd = checkMentions(toCheck, m.ownMentionIDs)
+		}
+
 		if m.startJID != "" {
 			for i, c := range m.visibleChats() {
 				if c.JID != m.startJID {
@@ -1209,7 +1309,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = i
 				m.focusList = false
 				m.switchChat(c)
-				return m, tea.Batch(markChatReadCmd(c.JID), loadMessages(c.JID, m.mentionNames))
+				return m, tea.Batch(markChatReadCmd(c.JID), loadMessages(c.JID, m.mentionNames), mentionCmd)
 			}
 			// Not found yet (e.g. wacli's store hasn't synced it in); the
 			// next refresh's chatsLoadedMsg retries since startJID is kept.
@@ -1220,6 +1320,25 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor < 0 {
 			m.cursor = 0
 		}
+		return m, mentionCmd
+
+	case ownMentionIDsMsg:
+		if msg.err != nil {
+			m.err = logErr(msg.err)
+			return m, nil
+		}
+		m.ownMentionIDs = msg.ids
+		return m, nil
+
+	case mentionsCheckedMsg:
+		for jid, found := range msg.mentioned {
+			if found {
+				m.mentionedChats[jid] = true
+			} else {
+				delete(m.mentionedChats, jid)
+			}
+		}
+		maps.Copy(m.lastUnreadSeen, msg.seen)
 		return m, nil
 
 	case previewLoadMsg:
@@ -2168,7 +2287,7 @@ func (m model) View() string {
 		return renderHelp(m.width, m.height)
 	}
 
-	listPane := renderChatList(m.visibleChats(), m.cursor, m.openJID, m.focusList, listWidth, m.height-4, m.listBottomLine())
+	listPane := renderChatList(m.visibleChats(), m.cursor, m.openJID, m.focusList, listWidth, m.height-4, m.listBottomLine(), m.mentionedChats)
 
 	msgPane := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -2512,7 +2631,7 @@ func borderColor(active bool) lipgloss.Color {
 	return rcBorder
 }
 
-func renderChatList(chats []Chat, cursor int, openJID string, focused bool, width, height int, bottomLine string) string {
+func renderChatList(chats []Chat, cursor int, openJID string, focused bool, width, height int, bottomLine string, mentionedChats map[string]bool) string {
 	var b strings.Builder
 	nameW := width - 10
 	if nameW < 4 {
@@ -2529,10 +2648,15 @@ func renderChatList(chats []Chat, cursor int, openJID string, focused bool, widt
 	}
 	for i := start; i < end; i++ {
 		c := chats[i]
+		mentioned := mentionedChats[c.JID]
 		name := truncate(c.Name, nameW)
 		badge := ""
 		if c.UnreadCount > 0 {
-			badge = fmt.Sprintf(" (%d)", c.UnreadCount)
+			if mentioned {
+				badge = fmt.Sprintf(" (@%d)", c.UnreadCount)
+			} else {
+				badge = fmt.Sprintf(" (%d)", c.UnreadCount)
+			}
 		}
 		icon := "👤"
 		if c.Kind == "group" {
@@ -2546,7 +2670,10 @@ func renderChatList(chats []Chat, cursor int, openJID string, focused bool, widt
 		if c.JID == openJID {
 			style = style.Bold(true)
 		}
-		if c.UnreadCount > 0 {
+		switch {
+		case mentioned:
+			style = style.Foreground(rcRed)
+		case c.UnreadCount > 0:
 			style = style.Foreground(rcYellow)
 		}
 		if i == cursor {

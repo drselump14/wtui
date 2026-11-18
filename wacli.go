@@ -268,6 +268,37 @@ func resolveMentionNames(ids []string) (map[string]string, error) {
 	return names, nil
 }
 
+// fetchOwnMentionIDs returns the signed-in account's own @mention digits:
+// its phone number (from "wacli doctor"'s linked_jid) and, separately, its
+// LID, since a mention token embeds whichever of the two the sender's
+// client happened to use. The LID lookup is best-effort — if it fails, the
+// phone number alone is still returned, since that's enough to catch most
+// mentions.
+func fetchOwnMentionIDs() (map[string]bool, error) {
+	var env envelope[struct {
+		LinkedJID string `json:"linked_jid"`
+	}]
+	if err := runWacli(&env, "doctor"); err != nil {
+		return nil, err
+	}
+	if !env.Success {
+		return nil, fmt.Errorf("wacli: %s", deref(env.Error))
+	}
+	phone, _, ok := strings.Cut(env.Data.LinkedJID, "@")
+	if !ok || phone == "" {
+		return nil, fmt.Errorf("wacli doctor: no linked_jid")
+	}
+	ids := map[string]bool{phone: true}
+
+	var lidEnv envelope[[]mentionResolution]
+	if err := runWacli(&lidEnv, "contacts", "resolve", phone); err == nil && lidEnv.Success && len(lidEnv.Data) > 0 {
+		if lid := strings.TrimSuffix(lidEnv.Data[0].LID, "@lid"); lid != "" {
+			ids[lid] = true
+		}
+	}
+	return ids, nil
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return "unknown error"
