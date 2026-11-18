@@ -6,8 +6,11 @@ import (
 	"image"
 	_ "image/jpeg"
 	"image/png"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	_ "golang.org/x/image/webp" // WhatsApp stickers are WebP
 )
@@ -37,6 +40,100 @@ func downloadMedia(chatJID, msgID string) (string, error) {
 		return "", fmt.Errorf("media download: empty path in response")
 	}
 	return env.Data.Path, nil
+}
+
+// saveMediaToDownloads downloads msgID's media (via downloadMedia, which
+// no-ops if it's already cached) and copies it into ~/Downloads so it
+// ends up somewhere the user can find it outside wacli's internal media
+// store. filename is the message's own Filename (set for document sends);
+// when it's "" (images, videos, stickers), the name is msgID plus an
+// extension picked from mimeType — not the cached file's own basename,
+// which wacli names things like "message-<ID>.jfif" for a plain JPEG.
+func saveMediaToDownloads(chatJID, msgID, filename, mimeType string) (string, error) {
+	src, err := downloadMedia(chatJID, msgID)
+	if err != nil {
+		return "", err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	name := filename
+	if name == "" {
+		ext := extFromMime(mimeType)
+		if ext == "" {
+			ext = filepath.Ext(src)
+		}
+		name = msgID + ext
+	}
+	dest := uniquePath(filepath.Join(home, "Downloads", name))
+
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.Create(dest)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dest)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+// extFromMime returns the conventional file extension for a WhatsApp
+// media MIME type, or "" if mimeType is empty or unrecognized — wacli's
+// own cached-file extension (e.g. ".jfif" for a plain JPEG) is a fallback
+// the caller uses instead, not this function.
+func extFromMime(mimeType string) string {
+	mimeType, _, _ = strings.Cut(mimeType, ";") // drop any "; codecs=..." parameter
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "video/mp4":
+		return ".mp4"
+	case "video/3gpp":
+		return ".3gp"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/mp4", "audio/aac":
+		return ".m4a"
+	case "application/pdf":
+		return ".pdf"
+	}
+	return ""
+}
+
+// uniquePath appends " (n)" before path's extension, trying n = 1, 2, …,
+// until it names a file that doesn't exist yet, so saving the same media
+// twice doesn't clobber the first copy.
+func uniquePath(path string) string {
+	if _, err := os.Stat(path); err != nil {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s (%d)%s", base, i, ext)
+		if _, err := os.Stat(candidate); err != nil {
+			return candidate
+		}
+	}
 }
 
 // canExtractGifFrame reports whether ffmpeg is on PATH, needed to pull a

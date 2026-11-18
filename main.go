@@ -212,9 +212,10 @@ type model struct {
 	unread     map[string]bool
 	openUnread int // chat's unread count when opened; consumed by the first load
 
-	videoLoading bool   // true while "o" is downloading media to open
+	videoLoading bool   // true while "o" is downloading media to open, or "s" to save it
 	loadingLabel string // what is downloading, shown next to the spinner
 	videoFrame   int    // spinner frame for the downloading indicator
+	saving       bool   // true if the in-flight videoLoading download is "s" (save to disk) rather than "o" (open/play), for the footer's verb
 
 	// ownMentionIDs holds the signed-in account's own @mention digits (its
 	// phone number and, separately, its LID), fetched once at startup. A
@@ -859,6 +860,26 @@ func openMedia(jid, msgID string) tea.Cmd {
 	}
 }
 
+// mediaSavedMsg reports the outcome of "s" saving a message's media to
+// ~/Downloads: path is the file it ended up at (unused on error).
+type mediaSavedMsg struct {
+	path string
+	err  error
+}
+
+// saveSelectedMedia downloads the message's media if it isn't already
+// cached locally, then copies it into ~/Downloads under filename (the
+// message's own Filename if WhatsApp sent one) or, for an image/video/
+// sticker with no filename, msgID plus an extension picked from
+// mimeType, so it ends up somewhere the user can find it outside wacli's
+// internal store.
+func saveSelectedMedia(jid, msgID, filename, mimeType string) tea.Cmd {
+	return func() tea.Msg {
+		path, err := saveMediaToDownloads(jid, msgID, filename, mimeType)
+		return mediaSavedMsg{path: path, err: err}
+	}
+}
+
 var urlPattern = regexp.MustCompile(`(?i)\b(?:https?://|www\.)[^\s<>"']+`)
 
 // firstURL returns the first http(s) or www. link in text, without trailing
@@ -957,6 +978,14 @@ func fitImage(w, h, maxCols, maxRows int) (cols, rows int) {
 // selected message's "🖼 [image]" marker, so the inline preview has
 // somewhere to draw without overlapping the text that follows.
 const imageBoxRows = 12
+
+// isStickerPath reports whether path names a WebP image, so an attached
+// file sends as a sticker (`wacli send sticker`, no caption) rather than a
+// plain file. WhatsApp stickers are WebP-only, so the extension alone is
+// enough to tell.
+func isStickerPath(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".webp")
+}
 
 // isPreviewable reports whether msg is a live (not revoked/deleted) image
 // or sticker — the kinds of media the kitty split-pane "o" viewer knows
@@ -1510,9 +1539,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.input.Focus()
 
 	case videoResultMsg:
-		m.videoLoading = false
+		m.videoLoading, m.saving = false, false
 		if msg.err != nil {
 			m.err = logErr(msg.err)
+		}
+		return m, nil
+
+	case mediaSavedMsg:
+		m.videoLoading, m.saving = false, false
+		if msg.err != nil {
+			m.err = logErr(msg.err)
+		} else {
+			m.notice = "saved to " + msg.path
 		}
 		return m, nil
 
@@ -1718,6 +1756,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Stay in compose mode so the next message can be typed
 				// right away while this one sends in the background.
 				if path != "" {
+					if isStickerPath(path) {
+						// Stickers can't carry a caption, unlike any other
+						// attached file; whatever text was typed alongside
+						// it is simply dropped.
+						return m, m.queueStickerSend(m.openJID, path, replyTo, owned)
+					}
 					return m, m.queueMediaSend(m.openJID, path, text, replyTo, owned)
 				}
 				return m, m.queueSend(m.openJID, text, replyTo, mentions)
@@ -2025,6 +2069,25 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.openSelected()
 			}
 			return m, nil
+		case "s":
+			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
+				sel := m.openMsgs[m.selectedMsg]
+				if isPendingID(sel.MsgID) {
+					m.err = "can't save: message hasn't finished sending yet"
+					return m, nil
+				}
+				if sel.MediaType == "" || sel.Revoked || sel.DeletedForMe {
+					m.err = "nothing to save: message has no media"
+					return m, nil
+				}
+				if m.videoLoading {
+					return m, nil
+				}
+				m.videoLoading, m.saving, m.err = true, true, ""
+				m.loadingLabel = sel.MediaType
+				return m, tea.Batch(saveSelectedMedia(m.openJID, sel.MsgID, sel.Filename, sel.MimeType), videoTick())
+			}
+			return m, nil
 		case "i":
 			if !m.focusList && m.openJID != "" {
 				m.composing = true
@@ -2192,7 +2255,7 @@ func renderHelp(width, height int) string {
 		{"ctrl+n / ctrl+p", "next / previous chat (also while composing)"},
 		{"i", "compose a message"},
 		{"ctrl+v", "paste a clipboard image (while composing)"},
-		{"ctrl+t", "attach a file from this pc: ranger/lf/vifm/nnn if found, else type a path (while composing)"},
+		{"ctrl+t", "attach a file from this pc: ranger/lf/vifm/nnn if found, else type a path (while composing); a .webp sends as a sticker"},
 		{"@", "mention a sender in this chat (tab/enter picks, ↑/↓ moves)"},
 		{"A", "mark all of this chat's messages as read"},
 		{"r", "reply to selected message"},
@@ -2200,6 +2263,7 @@ func renderHelp(width, height int) string {
 		{"E", "who reacted to selected message (h/l emoji tabs, j/k names)"},
 		{"f", "jump to the message being replied to"},
 		{"o", "open media or link"},
+		{"s", "save selected message's media to ~/Downloads"},
 		{"R / x", "retry / discard a failed send"},
 		{"d", "delete selected message (for me, or for everyone if it's yours)"},
 		{"y", "copy selected message's text to clipboard"},
@@ -2316,7 +2380,11 @@ func (m model) View() string {
 		footer = m.matchStatus() + "n/p: next/prev match  esc: clear search  ?: help"
 	}
 	if m.videoLoading {
-		footer = lipgloss.NewStyle().Foreground(rcYellow).Render(spinnerFrames[m.videoFrame] + " downloading " + m.loadingLabel + "…")
+		verb := "downloading"
+		if m.saving {
+			verb = "saving"
+		}
+		footer = lipgloss.NewStyle().Foreground(rcYellow).Render(spinnerFrames[m.videoFrame] + " " + verb + " " + m.loadingLabel + "…")
 	} else if m.hasSelectedImage() {
 		if e := m.imgCache[m.openMsgs[m.selectedMsg].MsgID]; e != nil && e.err != "" {
 			footer = lipgloss.NewStyle().Foreground(rcRed).Render("image preview error: " + e.err)
@@ -2437,8 +2505,12 @@ func (m model) sendBoxView() string {
 			parts = append(parts, label+" "+preview)
 		}
 		if m.draftImagePath != "" {
+			verb := "attached"
+			if isStickerPath(m.draftImagePath) {
+				verb = "staged as sticker, no caption"
+			}
 			attached := lipgloss.NewStyle().Foreground(rcFg).
-				Render(fmt.Sprintf("📎 %s attached (esc to remove)", filepath.Base(m.draftImagePath)))
+				Render(fmt.Sprintf("📎 %s %s (esc to remove)", filepath.Base(m.draftImagePath), verb))
 			parts = append(parts, attached)
 		}
 		replyLine = strings.Join(parts, "   ") + "\n"

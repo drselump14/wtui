@@ -40,6 +40,8 @@ type Message struct {
 	DisplayText  string `json:"DisplayText"`
 	MediaType    string `json:"MediaType"`
 	MediaCaption string `json:"MediaCaption"`
+	Filename     string `json:"Filename"` // original filename, set for document sends; "" for image/video/sticker
+	MimeType     string `json:"MimeType"` // e.g. "image/jpeg"; used to pick a sane extension when saving media without a Filename
 	Revoked      bool   `json:"Revoked"`
 	DeletedForMe bool   `json:"DeletedForMe"`
 	QuotedMsgID  string `json:"quoted_msg_id"`
@@ -183,6 +185,24 @@ func sendFile(chatJID, path, caption, replyTo string) error {
 	if caption != "" {
 		args = append(args, "--caption", caption)
 	}
+	if replyTo != "" {
+		args = append(args, "--reply-to", replyTo)
+	}
+	var env envelope[any]
+	if err := runWacli(&env, args...); err != nil {
+		return err
+	}
+	if !env.Success {
+		return fmt.Errorf("wacli: %s", deref(env.Error))
+	}
+	return nil
+}
+
+// sendSticker sends path (a WebP image) to chatJID as a sticker. Unlike
+// sendFile, wacli's sticker send has no --caption flag — WhatsApp stickers
+// can't carry one.
+func sendSticker(chatJID, path, replyTo string) error {
+	args := []string{"send", "sticker", "--to", chatJID, "--file", path, "--lock-wait", writeLockWait}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
 	}

@@ -28,9 +28,10 @@ const (
 type pendingSend struct {
 	id         string // local MsgID, pendingIDPrefix + counter
 	jid        string
-	text       string // message text, or a media send's caption ("" if none)
-	mediaPath  string // non-"" for a media send: local file path given to `wacli send file`
+	text       string // message text, or a media send's caption ("" if none; always "" for a sticker)
+	mediaPath  string // non-"" for a media send: local file path given to `wacli send file` (or `wacli send sticker`)
 	mediaOwned bool   // true if mediaPath is a wtui temp file to delete once wacli has read it; false for a user file (ctrl+t attach), left untouched on disk
+	sticker    bool   // true to send mediaPath via `wacli send sticker` instead of `wacli send file`
 	replyTo    string
 	mentions   []string // phone numbers to tag via --mention (text sends only; wacli's file send has no --mention flag)
 	at         time.Time
@@ -107,6 +108,35 @@ func (m *model) queueMediaSend(jid, path, caption, replyTo string, owned bool) t
 	return m.startNextSend()
 }
 
+// queueStickerSend appends a placeholder for a sticker (a WebP image
+// attached from disk via ctrl+t) at path, and starts sending it if no
+// other send is in flight. Stickers carry no caption, unlike a plain file
+// send. owned marks path as a wtui temp file to delete once sent; a user's
+// own attached file is left on disk either way.
+func (m *model) queueStickerSend(jid, path, replyTo string, owned bool) tea.Cmd {
+	m.pendingSeq++
+	id := fmt.Sprintf("%s%d", pendingIDPrefix, m.pendingSeq)
+	m.pending = append(m.pending, pendingSend{
+		id:         id,
+		jid:        jid,
+		mediaPath:  path,
+		mediaOwned: owned,
+		sticker:    true,
+		replyTo:    replyTo,
+		at:         time.Now(),
+	})
+	if png, w, h, err := loadImagePNG(path); err == nil {
+		m.imgCache[id] = &imgEntry{png: png, w: w, h: h}
+	}
+	if jid == m.openJID && m.openMsgs != nil {
+		m.mergePending()
+		m.selectedMsg = len(m.openMsgs) - 1
+		m.rebuildContent()
+		m.scrollToSelection()
+	}
+	return m.startNextSend()
+}
+
 // startNextSend launches the oldest queued send unless one is in flight.
 func (m *model) startNextSend() tea.Cmd {
 	for i := range m.pending {
@@ -120,10 +150,15 @@ func (m *model) startNextSend() tea.Cmd {
 			continue
 		}
 		p.state = sendInFlight
-		id, jid, text, mediaPath, mediaOwned, replyTo, mentions := p.id, p.jid, p.text, p.mediaPath, p.mediaOwned, p.replyTo, p.mentions
+		id, jid, text, mediaPath, mediaOwned, sticker, replyTo, mentions := p.id, p.jid, p.text, p.mediaPath, p.mediaOwned, p.sticker, p.replyTo, p.mentions
 		send := func() tea.Msg {
 			if mediaPath != "" {
-				err := sendFile(jid, mediaPath, text, replyTo)
+				var err error
+				if sticker {
+					err = sendSticker(jid, mediaPath, replyTo)
+				} else {
+					err = sendFile(jid, mediaPath, text, replyTo)
+				}
 				if err == nil && mediaOwned {
 					os.Remove(mediaPath) // wacli has read it; no longer needed
 				}
@@ -260,7 +295,10 @@ func (m *model) mergePending() {
 			DisplayText: p.text,
 			QuotedMsgID: p.replyTo,
 		}
-		if p.isMedia() {
+		switch {
+		case p.sticker:
+			msg.MediaType = "sticker"
+		case p.isMedia():
 			msg.MediaType = "image"
 		}
 		msgs = append(msgs, msg)
@@ -302,20 +340,23 @@ type sendLabel struct {
 // summary of in-flight message/file sends and reactions, or "" when
 // nothing is in flight.
 func (m model) bgTaskSummary() string {
-	var msgs, files int
+	var msgs, files, stickers int
 	for _, p := range m.pending {
 		if p.state != sendQueued && p.state != sendInFlight {
 			continue
 		}
-		if p.isMedia() {
+		switch {
+		case p.sticker:
+			stickers++
+		case p.isMedia():
 			files++
-		} else {
+		default:
 			msgs++
 		}
 	}
 	reacts := len(m.reactSends)
 	dels := len(m.delSends)
-	if msgs == 0 && files == 0 && reacts == 0 && dels == 0 {
+	if msgs == 0 && files == 0 && stickers == 0 && reacts == 0 && dels == 0 {
 		return ""
 	}
 	var sending []string
@@ -327,6 +368,9 @@ func (m model) bgTaskSummary() string {
 	}
 	if files > 0 {
 		sending = append(sending, pluralize(files, "file"))
+	}
+	if stickers > 0 {
+		sending = append(sending, pluralize(stickers, "sticker"))
 	}
 	var clauses []string
 	if len(sending) > 0 {
