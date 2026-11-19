@@ -1609,41 +1609,38 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		key := msg.String()
+		if appKeys.action("global", key) == "quit" {
+			return m, tea.Quit
+		}
+
 		// An error or notice popup swallows the next key to dismiss it.
 		if m.err != "" || m.notice != "" {
-			if msg.String() == "ctrl+c" {
-				return m, tea.Quit
-			}
 			m.err = ""
 			m.notice = ""
 			return m, nil
 		}
 		if m.showHelp {
-			if msg.String() == "ctrl+c" {
-				return m, tea.Quit
-			}
 			m.showHelp = false
 			return m, nil
 		}
 		if m.showReactors {
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "h", "left":
+			switch appKeys.action("reactors", key) {
+			case "prevTab":
 				if n := len(m.reactorTabs); n > 0 {
 					m.reactorTabSel = (m.reactorTabSel - 1 + n) % n
 					m.reactorNameSel = 0
 				}
-			case "l", "right":
+			case "nextTab":
 				if n := len(m.reactorTabs); n > 0 {
 					m.reactorTabSel = (m.reactorTabSel + 1) % n
 					m.reactorNameSel = 0
 				}
-			case "k", "up":
+			case "prevName":
 				if m.reactorNameSel > 0 {
 					m.reactorNameSel--
 				}
-			case "j", "down":
+			case "nextName":
 				if m.reactorTabSel < len(m.reactorTabs) {
 					if n := len(m.reactorTabs[m.reactorTabSel].names); m.reactorNameSel < n-1 {
 						m.reactorNameSel++
@@ -1656,15 +1653,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.composing {
 			if m.attachingFile {
-				switch msg.String() {
-				case "ctrl+c":
-					return m, tea.Quit
-				case "esc":
+				switch appKeys.action("attach", key) {
+				case "cancel":
 					m.attachingFile = false
 					m.filePathInput.Reset()
 					m.filePathInput.Blur()
 					return m, nil
-				case "enter":
+				case "confirm":
 					raw := strings.TrimSpace(m.filePathInput.Value())
 					if raw == "" {
 						return m, nil
@@ -1688,7 +1683,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.filePathInput.Reset()
 					m.filePathInput.Blur()
 					return m, nil
-				case "tab":
+				case "complete":
 					m.filePathInput.SetValue(completePath(m.filePathInput.Value()))
 					m.filePathInput.CursorEnd()
 					return m, nil
@@ -1698,10 +1693,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 			}
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "esc":
+			switch appKeys.action("compose", key) {
+			case "cancel":
 				if m.mentionOpen {
 					// First esc just dismisses the dropdown, leaving the
 					// draft (including the "@" typed so far) untouched.
@@ -1725,11 +1718,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Blur()
 				m.input.Reset()
 				return m, nil
-			case "up", "down":
+			case "vertical":
 				if m.mentionOpen {
 					query, _ := activeMentionQuery(m.input.Value())
 					if n := len(mentionCandidatesFor(m.openMsgs, query)); n > 0 {
-						if msg.String() == "up" {
+						if key == "up" {
 							m.mentionSel = (m.mentionSel - 1 + n) % n
 						} else {
 							m.mentionSel = (m.mentionSel + 1) % n
@@ -1740,22 +1733,22 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmd tea.Cmd
 				m.input, cmd = m.input.Update(msg)
 				return m, cmd
-			case "ctrl+n", "ctrl+p":
+			case "switchChat":
 				if m.mentionOpen {
 					return m, nil // switching chats mid-mention would strand the dropdown on the old chat's senders
 				}
 				// Switch chats without leaving the send box. The draft
 				// text and any staged image carry over; the reply
 				// context belongs to the old chat, so it is dropped.
-				return m.stepChat(msg.String() == "ctrl+n")
-			case "ctrl+g":
+				return m.stepChat(key == "ctrl+n")
+			case "openEditor":
 				return m, openEditorCmd(m.input.Value())
-			case "ctrl+v":
+			case "pasteImage":
 				if m.openJID == "" {
 					return m, nil
 				}
 				return m, pasteImageCmd()
-			case "ctrl+t":
+			case "attachFile":
 				if m.openJID == "" {
 					return m, nil
 				}
@@ -1767,7 +1760,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.attachingFile = true
 				m.filePathInput.Reset()
 				return m, m.filePathInput.Focus()
-			case "tab", "enter":
+			case "send":
 				if m.mentionOpen {
 					if query, ok := activeMentionQuery(m.input.Value()); ok {
 						if cands := mentionCandidatesFor(m.openMsgs, query); len(cands) > 0 {
@@ -1779,7 +1772,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.mentionOpen = false
 				}
-				if msg.String() == "tab" {
+				if key == "tab" {
 					return m, nil
 				}
 				text := strings.TrimSpace(m.input.Value())
@@ -1820,10 +1813,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.searching {
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "esc", "ctrl+/", "ctrl+_":
+			switch appKeys.action("search", key) {
+			case "close":
 				// ctrl+/ toggles the chat search: pressing it again while
 				// the bar is open closes it, same as esc.
 				m.searching = false
@@ -1832,13 +1823,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.search.Reset()
 				m.cursor = 0
 				return m, nil
-			case "enter":
+			case "commit":
 				// Commit the filter and stop typing — the (still filtered)
 				// chat list stays navigable with ctrl+n/ctrl+p.
 				m.searching = false
 				m.search.Blur()
 				return m, nil
-			case "up", "ctrl+p":
+			case "prev":
 				// Step through the filtered chats, previewing each in the
 				// message pane (without marking it read) while the search
 				// bar keeps focus.
@@ -1846,7 +1837,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor--
 				}
 				return m, m.previewCursor()
-			case "down", "ctrl+n":
+			case "next":
 				if m.cursor < len(m.visibleChats())-1 {
 					m.cursor++
 				}
@@ -1864,26 +1855,24 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.msgSearching {
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "esc":
+			switch appKeys.action("msgsearch", key) {
+			case "close":
 				m.msgSearching = false
 				m.msgQuery = ""
 				m.search.Blur()
 				m.search.Reset()
 				return m, nil
-			case "enter":
+			case "commit":
 				m.msgSearching = false
 				m.search.Blur()
 				if len(m.messageMatches()) == 0 {
 					m.msgQuery = ""
 				}
 				return m, m.loadSelectedImage()
-			case "ctrl+n", "down":
+			case "next":
 				m.nextMessageMatch(1)
 				return m, nil
-			case "ctrl+p", "up":
+			case "prev":
 				m.nextMessageMatch(-1)
 				return m, nil
 			default:
@@ -1903,15 +1892,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.delConfirmOpen {
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "esc", "n":
+			switch appKeys.action("delconfirm", key) {
+			case "cancel":
 				m.delConfirmOpen = false
 				return m, nil
-			case "1", "y":
+			case "forMe":
 				return m.confirmDelete(true)
-			case "2":
+			case "everyone":
 				if m.delConfirmOnlyForMe {
 					return m, nil // "for everyone" wasn't offered; ignore
 				}
@@ -1921,29 +1908,27 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.reactOpen {
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "esc":
+			switch appKeys.action("react", key) {
+			case "cancel":
 				m.reactOpen = false
 				return m, nil
-			case "left", "h":
+			case "prev":
 				m.reactSel = (m.reactSel - 1 + len(reactionEmojis)) % len(reactionEmojis)
 				return m, nil
-			case "right", "l":
+			case "next":
 				m.reactSel = (m.reactSel + 1) % len(reactionEmojis)
 				return m, nil
-			case "up", "k":
+			case "up":
 				if cols := reactGridCols(m.msgPaneWidth()); m.reactSel-cols >= 0 {
 					m.reactSel -= cols
 				}
 				return m, nil
-			case "down", "j":
+			case "down":
 				if cols := reactGridCols(m.msgPaneWidth()); m.reactSel+cols < len(reactionEmojis) {
 					m.reactSel += cols
 				}
 				return m, nil
-			case "enter":
+			case "confirm":
 				m.reactOpen = false
 				emoji := reactionEmojis[m.reactSel]
 				m.reactSeq++
@@ -1959,7 +1944,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		key := msg.String()
 		wasG := m.lastKey == "g"
 		m.lastKey = ""
 
@@ -1978,14 +1962,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		switch key {
-		case "ctrl+c", "q":
+		switch appKeys.action("browse", key) {
+		case "quit":
 			return m, tea.Quit
-		case "tab":
-			// Focus never moves to the chat list; it's navigated with
-			// ctrl+n/ctrl+p instead and the message pane stays focused.
-			return m, nil
-		case "G":
+		case "bottom":
 			if m.focusList {
 				m.cursor = len(m.visibleChats()) - 1
 			} else if len(m.openMsgs) > 0 {
@@ -1994,7 +1974,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scrollToSelection()
 			}
 			return m, m.loadSelectedImage()
-		case "ctrl+d":
+		case "halfPageDown":
 			if m.focusList {
 				m.cursor += (m.height - 4) / 2
 				if n := len(m.visibleChats()); m.cursor > n-1 {
@@ -2004,7 +1984,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.HalfPageDown()
 			}
 			return m, nil
-		case "ctrl+u":
+		case "halfPageUp":
 			if m.focusList {
 				m.cursor -= (m.height - 4) / 2
 				if m.cursor < 0 {
@@ -2015,6 +1995,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "up":
+			// The arrow key also drives the chat list when it has focus;
+			// "vimUp" (k, below) deliberately doesn't — the list is
+			// navigated with ctrl+n/ctrl+p instead.
 			if m.focusList {
 				if m.cursor > 0 {
 					m.cursor--
@@ -2027,9 +2010,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scrollToSelection()
 			}
 			return m, m.loadSelectedImage()
-		case "k":
-			// Unlike the arrow keys, j/k only move the message selection —
-			// the chat list is navigated with ctrl+n/ctrl+p instead.
+		case "vimUp":
 			if m.focusList {
 				return m, nil
 			}
@@ -2052,7 +2033,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scrollToSelection()
 			}
 			return m, m.loadSelectedImage()
-		case "j":
+		case "vimDown":
 			if m.focusList {
 				return m, nil
 			}
@@ -2062,13 +2043,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scrollToSelection()
 			}
 			return m, m.loadSelectedImage()
-		case "pgup":
+		case "pageUp":
 			m.viewport.PageUp()
 			return m, nil
-		case "pgdown":
+		case "pageDown":
 			m.viewport.PageDown()
 			return m, nil
-		case "/":
+		case "searchMessages":
 			if m.openJID == "" || len(m.openMsgs) == 0 {
 				return m, nil
 			}
@@ -2078,7 +2059,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.search.Placeholder = "search messages…"
 			m.search.Reset()
 			return m, m.search.Focus()
-		case "ctrl+/", "ctrl+_":
+		case "searchChats":
 			m.searching = true
 			m.chatFilter = ""
 			m.cursor = 0
@@ -2086,7 +2067,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.search.Placeholder = "search chats…"
 			m.search.Reset()
 			return m, m.search.Focus()
-		case "enter", "l", "right":
+		case "open":
 			if m.focusList {
 				vis := m.visibleChats()
 				if m.cursor >= 0 && m.cursor < len(vis) {
@@ -2105,12 +2086,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
-		case "o":
+		case "openMedia":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				return m.openSelected()
 			}
 			return m, nil
-		case "s":
+		case "saveMedia":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
 				if isPendingID(sel.MsgID) {
@@ -2129,13 +2110,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(saveSelectedMedia(m.openJID, sel.MsgID, sel.Filename, sel.MimeType), videoTick())
 			}
 			return m, nil
-		case "i":
+		case "compose":
 			if !m.focusList && m.openJID != "" {
 				m.composing = true
 				return m, m.input.Focus()
 			}
 			return m, nil
-		case "A":
+		case "markChatRead":
 			if m.openJID == "" {
 				return m, nil
 			}
@@ -2144,7 +2125,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.rebuildContent()
 			return m, markChatReadCmd(m.openJID)
-		case "M":
+		case "markMutedRead":
 			var toMark []string
 			for _, c := range m.chats {
 				if c.Muted() && c.UnreadCount > 0 {
@@ -2162,7 +2143,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rebuildContent()
 			}
 			return m, markChatsReadCmd(toMark)
-		case "r":
+		case "reply":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
 				if isPendingID(sel.MsgID) {
@@ -2175,7 +2156,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.input.Focus()
 			}
 			return m, nil
-		case "e":
+		case "react":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
 				if isPendingID(sel.MsgID) {
@@ -2187,7 +2168,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.reactTarget = sel.MsgID
 			}
 			return m, nil
-		case "d":
+		case "delete":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
 				if isPendingID(sel.MsgID) {
@@ -2203,7 +2184,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.delConfirmOnlyForMe = !sel.FromMe
 			}
 			return m, nil
-		case "y":
+		case "copyText":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
 				text := captionAwareText(sel)
@@ -2216,7 +2197,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
-		case "Y":
+		case "copyID":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				id := m.openMsgs[m.selectedMsg].MsgID
 				if err := copyToClipboard(id); err != nil {
@@ -2226,7 +2207,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
-		case "E":
+		case "showReactors":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				if entries := m.reactors[m.openMsgs[m.selectedMsg].MsgID]; len(entries) > 0 {
 					m.reactorTabs = groupReactions(entries)
@@ -2238,17 +2219,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
-		case "R", "x":
+		case "retrySend":
 			if m.focusList || m.selectedMsg < 0 || m.selectedMsg >= len(m.openMsgs) {
 				return m, nil
 			}
 			id := m.openMsgs[m.selectedMsg].MsgID
-			var cmd tea.Cmd
-			if key == "R" {
-				cmd = m.retrySend(id)
-			} else if !m.dropFailedSend(id) {
-				return m, nil
-			}
+			cmd := m.retrySend(id)
 			m.mergePending()
 			m.rebuildContent()
 			if cmd != nil && !m.sendTicking {
@@ -2256,7 +2232,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd = tea.Batch(cmd, sendTick())
 			}
 			return m, cmd
-		case "f":
+		case "dismissFailedSend":
+			if m.focusList || m.selectedMsg < 0 || m.selectedMsg >= len(m.openMsgs) {
+				return m, nil
+			}
+			id := m.openMsgs[m.selectedMsg].MsgID
+			if !m.dropFailedSend(id) {
+				return m, nil
+			}
+			m.mergePending()
+			m.rebuildContent()
+			return m, nil
+		case "jumpToQuoted":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
 				if sel.QuotedMsgID != "" {
@@ -2271,21 +2258,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, m.loadSelectedImage()
-		case "ctrl+n", "ctrl+p":
+		case "switchChat":
 			return m.stepChat(key == "ctrl+n")
-		case "n":
+		case "nextMatch":
 			if m.msgQuery == "" {
 				return m, nil
 			}
 			m.nextMessageMatch(1)
 			return m, m.loadSelectedImage()
-		case "p", "N":
+		case "prevMatch":
 			if m.msgQuery == "" {
 				return m, nil
 			}
 			m.nextMessageMatch(-1)
 			return m, m.loadSelectedImage()
-		case "h", "left", "esc":
+		case "clearFilter":
 			if m.msgQuery != "" {
 				m.msgQuery = ""
 				m.search.Reset()
@@ -2296,7 +2283,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 			}
 			return m, nil
-		case "?":
+		case "help":
 			m.showHelp = true
 			return m, nil
 		}
@@ -3053,6 +3040,7 @@ func main() {
 	if f := initLogging(); f != nil {
 		defer f.Close()
 	}
+	appKeys = loadKeymap()
 
 	m := initialModel()
 	m.startJID = *chatJID
