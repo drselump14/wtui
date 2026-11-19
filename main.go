@@ -43,6 +43,7 @@ var (
 	rcImage        = lipgloss.Color("#B452CD") // messages that carry an image
 	rcQuote        = lipgloss.Color("#ACA8B2") // quoted original text in a reply
 	rcReact        = lipgloss.Color("#45506B") // reaction chip under a message
+	rcMeBg         = lipgloss.Color("#2F3B36") // bubble tint behind my own messages, WA-style
 )
 
 type tickMsg time.Time
@@ -2813,16 +2814,12 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 	// set in a single Render call, so a later nested reset can never
 	// clobber the highlight the way concatenating separately-styled,
 	// separately-reset spans would.
-	row := func(s string, fg lipgloss.Color, bold, selected bool) string {
-		bg := rcBg
-		if selected {
-			bg = rcMsgSelection
-		}
-		// Background is always set explicitly (never left to an outer
-		// wrapper): lipgloss renders an empty string's width-padding as a
-		// bare, unstyled reset-then-spaces, so a row with no text (the
-		// blank line between messages) would otherwise show no background
-		// at all across its full width.
+	// Background is always set explicitly (never left to an outer
+	// wrapper): lipgloss renders an empty string's width-padding as a
+	// bare, unstyled reset-then-spaces, so a row with no text (the
+	// blank line between messages) would otherwise show no background
+	// at all across its full width.
+	row := func(s string, fg lipgloss.Color, bold bool, bg lipgloss.Color) string {
 		st := lipgloss.NewStyle().Foreground(fg).Background(bg).Width(width)
 		if bold {
 			st = st.Bold(true)
@@ -2848,6 +2845,9 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 			headerColor = rcBlue
 		}
 		rowBg := rcBg
+		if msg.FromMe {
+			rowBg = rcMeBg
+		}
 		if selected {
 			rowBg = rcMsgSelection
 		}
@@ -2878,12 +2878,12 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 			case "gif":
 				marker = "🎞 [gif]"
 			}
-			writeLine(row(marker, rcImage, true, selected))
+			writeLine(row(marker, rcImage, true, rowBg))
 			if selected {
 				// Reserve blank rows for the inline preview drawn by
 				// inlineImageEscapes, so the text below doesn't overlap it.
 				for range imageBoxRows {
-					writeLine(row("", rcFg, false, true))
+					writeLine(row("", rcFg, false, rowBg))
 				}
 			}
 		}
@@ -2904,11 +2904,11 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 			quote, body := splitQuotedReply(text)
 			if quote != "" {
 				for _, l := range wrapPlain(quote, width-2) {
-					writeLine(row("│ "+l, rcQuote, false, selected))
+					writeLine(row("│ "+l, rcQuote, false, rowBg))
 				}
 			}
 			for _, l := range wrapPlain(collapseBlankLines(body), width) {
-				writeLine(row(l, textColor, false, selected))
+				writeLine(row(l, textColor, false, rowBg))
 			}
 		}
 		if entries := reactors[msg.MsgID]; len(entries) > 0 {
@@ -2930,7 +2930,7 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 			chips.WriteString(gapStyle.Render(strings.Repeat(" ", pad)))
 			writeLine(chips.String())
 		}
-		writeLine(row("", rcFg, false, selected))
+		writeLine(row("", rcFg, false, rowBg))
 	}
 	lineStart = append(lineStart, line)
 	return b.String(), lineStart
