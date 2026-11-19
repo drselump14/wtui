@@ -133,19 +133,27 @@ func fetchMessages(chatJID string, limit int) ([]Message, error) {
 	return msgs, nil
 }
 
-// writeLockWait is passed as --lock-wait on every write command (send,
-// react, delete, mark-read) so a second one issued while another is still
-// holding the store lock (e.g. a reaction fired while a file send is
-// writing, or a delete racing the periodic reload) waits its turn instead
-// of failing immediately with a lock error — wacli's own default for
-// --lock-wait is 0, i.e. no wait.
+// writeLockWait is passed as --lock-wait on `messages delete`, which has no
+// delegate-over-socket fallback in wacli: it must actually wait its turn for
+// the store lock (e.g. racing the periodic reload), so a long wait is the
+// only way for it to succeed while a transient writer holds the lock.
+// wacli's own default for --lock-wait is 0, i.e. no wait.
 const writeLockWait = "5s"
+
+// delegatedLockWait is passed on send/react/mark-read, which all delegate
+// over wacli's send socket when the lock is held — normally by `wacli sync
+// --follow`, which holds it for its entire run. Waiting out writeLockWait's
+// 5s for a lock that a running sync will never release just taxes every
+// send; a short wait still lets a same-process race (e.g. two quick sends
+// issued back to back with no sync daemon running) resolve on its own
+// before falling back to delegation.
+const delegatedLockWait = "500ms"
 
 // markChatRead marks chatJID as read, sending real read receipts for its
 // synced unread messages (per wacli's own read-receipt privacy setting).
 func markChatRead(chatJID string) error {
 	var env envelope[any]
-	if err := runWacli(&env, "chats", "mark-read", "--chat", chatJID, "--receipts", "--lock-wait", writeLockWait); err != nil {
+	if err := runWacli(&env, "chats", "mark-read", "--chat", chatJID, "--receipts", "--lock-wait", delegatedLockWait); err != nil {
 		return err
 	}
 	if !env.Success {
@@ -159,7 +167,7 @@ func markChatRead(chatJID string) error {
 // is the phone numbers embedded as "@<phone>" tokens in text, passed
 // through so WhatsApp actually tags and notifies them.
 func sendText(chatJID, text, replyTo string, mentions []string) error {
-	args := []string{"send", "text", "--to", chatJID, "--message", text, "--lock-wait", writeLockWait}
+	args := []string{"send", "text", "--to", chatJID, "--message", text, "--lock-wait", delegatedLockWait}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
 	}
@@ -181,7 +189,7 @@ func sendText(chatJID, text, replyTo string, mentions []string) error {
 // as the media's caption; if replyTo is non-empty, the message is sent as
 // a quoted reply to that MsgID.
 func sendFile(chatJID, path, caption, replyTo string) error {
-	args := []string{"send", "file", "--to", chatJID, "--file", path, "--lock-wait", writeLockWait}
+	args := []string{"send", "file", "--to", chatJID, "--file", path, "--lock-wait", delegatedLockWait}
 	if caption != "" {
 		args = append(args, "--caption", caption)
 	}
@@ -202,7 +210,7 @@ func sendFile(chatJID, path, caption, replyTo string) error {
 // sendFile, wacli's sticker send has no --caption flag — WhatsApp stickers
 // can't carry one.
 func sendSticker(chatJID, path, replyTo string) error {
-	args := []string{"send", "sticker", "--to", chatJID, "--file", path, "--lock-wait", writeLockWait}
+	args := []string{"send", "sticker", "--to", chatJID, "--file", path, "--lock-wait", delegatedLockWait}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
 	}
@@ -220,7 +228,7 @@ func sendSticker(chatJID, path, replyTo string) error {
 // chatJID. senderJID is the target message's original sender and is
 // required by wacli for group chats; it's ignored for 1:1 chats.
 func sendReact(chatJID, msgID, senderJID, emoji string) error {
-	args := []string{"send", "react", "--to", chatJID, "--id", msgID, "--reaction", emoji, "--lock-wait", writeLockWait}
+	args := []string{"send", "react", "--to", chatJID, "--id", msgID, "--reaction", emoji, "--lock-wait", delegatedLockWait}
 	if senderJID != "" {
 		args = append(args, "--sender", senderJID)
 	}
