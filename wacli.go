@@ -165,9 +165,12 @@ func markChatRead(chatJID string) error {
 // sendText sends a real WhatsApp text message to chatJID. If replyTo is
 // non-empty, the message is sent as a quoted reply to that MsgID. mentions
 // is the phone numbers embedded as "@<phone>" tokens in text, passed
-// through so WhatsApp actually tags and notifies them.
+// through so WhatsApp actually tags and notifies them. --allow-self is
+// always passed: wacli otherwise refuses a text send to the linked
+// account's own chat (its "Message Yourself" delivery ack is unreliable,
+// but wtui has no separate chat kind to special-case here).
 func sendText(chatJID, text, replyTo string, mentions []string) error {
-	args := []string{"send", "text", "--to", chatJID, "--message", text, "--lock-wait", delegatedLockWait}
+	args := []string{"send", "text", "--to", chatJID, "--message", text, "--lock-wait", delegatedLockWait, "--allow-self"}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
 	}
