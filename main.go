@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -518,6 +519,37 @@ type chatMarkedReadMsg struct{ err error }
 func markChatReadCmd(jid string) tea.Cmd {
 	return func() tea.Msg {
 		return chatMarkedReadMsg{err: markChatRead(jid)}
+	}
+}
+
+// chatsMarkedReadMsg reports the outcome of "M" bulk-marking every muted
+// chat with unread messages as read: count is how many succeeded (shown
+// even alongside a partial-failure err).
+type chatsMarkedReadMsg struct {
+	count int
+	err   error
+}
+
+// markChatsReadCmd marks each of jids as read, one at a time the same way
+// a single chat is (wacli's write commands contend for one store lock, so
+// there's no point firing them concurrently). It keeps going after an
+// error so one bad chat doesn't block the rest, and reports however many
+// it got through alongside a combined error for the ones that failed.
+func markChatsReadCmd(jids []string) tea.Cmd {
+	return func() tea.Msg {
+		var failed []string
+		marked := 0
+		for _, jid := range jids {
+			if err := markChatRead(jid); err != nil {
+				failed = append(failed, err.Error())
+				continue
+			}
+			marked++
+		}
+		if len(failed) > 0 {
+			return chatsMarkedReadMsg{count: marked, err: fmt.Errorf("%d/%d muted chats failed: %s", len(failed), len(jids), strings.Join(failed, "; "))}
+		}
+		return chatsMarkedReadMsg{count: marked}
 	}
 }
 
@@ -1455,6 +1487,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case chatsMarkedReadMsg:
+		if msg.err != nil {
+			m.err = logErr(msg.err)
+		} else {
+			m.notice = "marked " + pluralize(msg.count, "muted chat") + " as read"
+		}
+		return m, nil
+
 	case reactSentMsg:
 		for i, r := range m.reactSends {
 			if r.id == msg.id {
@@ -2104,6 +2144,24 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.rebuildContent()
 			return m, markChatReadCmd(m.openJID)
+		case "M":
+			var toMark []string
+			for _, c := range m.chats {
+				if c.Muted() && c.UnreadCount > 0 {
+					toMark = append(toMark, c.JID)
+				}
+			}
+			if len(toMark) == 0 {
+				m.notice = "no muted chats have unread messages"
+				return m, nil
+			}
+			if m.openJID != "" && slices.Contains(toMark, m.openJID) {
+				for id := range m.unread {
+					delete(m.unread, id)
+				}
+				m.rebuildContent()
+			}
+			return m, markChatsReadCmd(toMark)
 		case "r":
 			if !m.focusList && m.selectedMsg >= 0 && m.selectedMsg < len(m.openMsgs) {
 				sel := m.openMsgs[m.selectedMsg]
@@ -2259,6 +2317,7 @@ func renderHelp(width, height int) string {
 		{"ctrl+t", "attach a file from this pc: ranger/lf/vifm/nnn if found, else type a path (while composing); a .webp sends as a sticker"},
 		{"@", "mention a sender in this chat (tab/enter picks, ↑/↓ moves)"},
 		{"A", "mark all of this chat's messages as read"},
+		{"M", "mark all muted chats' unread messages as read"},
 		{"r", "reply to selected message"},
 		{"e", "react to selected message (←/→/↑/↓ pick, enter send)"},
 		{"E", "who reacted to selected message (h/l emoji tabs, j/k names)"},
