@@ -121,14 +121,19 @@ func (k *keymap) action(mode, key string) string {
 	return k.byKey[mode][key]
 }
 
-// keymapPath is where a user overrides wtui's keybindings, next to its
-// other dotfiles (~/.wtui.log).
+// keymapPath is where a user overrides wtui's keybindings: $XDG_CONFIG_HOME
+// (default ~/.config) + "wtui/keys.json", the standard per-app config
+// location rather than a bare dotfile.
 func keymapPath() string {
-	dir, err := os.UserHomeDir()
-	if err != nil {
-		dir = "."
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "."
+		}
+		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, ".wtui.keys.json")
+	return filepath.Join(dir, "wtui", "keys.json")
 }
 
 // loadKeymap builds the active keymap from defaultBindings, with any
