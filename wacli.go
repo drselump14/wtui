@@ -37,6 +37,7 @@ type Message struct {
 	SenderName   string `json:"SenderName"`
 	Timestamp    string `json:"Timestamp"`
 	FromMe       bool   `json:"FromMe"`
+	Text         string `json:"Text"` // the sender's own text, without the "> quoted" header DisplayText adds to replies
 	DisplayText  string `json:"DisplayText"`
 	MediaType    string `json:"MediaType"`
 	MediaCaption string `json:"MediaCaption"`

@@ -3025,12 +3025,20 @@ func captionAwareText(msg Message) string {
 	if msg.MediaType == "" || msg.MediaCaption == "" {
 		return text
 	}
-	if strings.HasPrefix(text, "> ") {
-		if nl := strings.Index(text, "\n"); nl >= 0 {
-			return text[:nl+1] + msg.MediaCaption
-		}
+	if quote, _ := splitQuotedReply(text, msg.Text); quote != "" {
+		return "> " + quote + "\n" + msg.MediaCaption
 	}
 	return msg.MediaCaption
+}
+
+// ownText is the part of msg's DisplayText that the sender actually wrote
+// (as opposed to wacli's "> quoted" reply header), used to find where a
+// multi-line quote ends: the caption for captioned media, else Text.
+func ownText(msg Message) string {
+	if msg.MediaType != "" && msg.MediaCaption != "" {
+		return msg.MediaCaption
+	}
+	return msg.Text
 }
 
 func renderMessages(msgs []Message, width int, selectedIdx int, unread map[string]bool, status map[string]sendLabel, reactors map[string][]reactionDetail) (string, []int) {
@@ -3138,9 +3146,9 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 			textColor = rcYellow // body text stands out yellow; deleted/revoked stays red
 		}
 		if text != "" {
-			quote, body := splitQuotedReply(text)
+			quote, body := splitQuotedReply(text, ownText(msg))
 			if quote != "" {
-				for _, l := range wrapPlain(quote, width-2) {
+				for _, l := range wrapPlain(collapseBlankLines(quote), width-2) {
 					writeLine(row("│ "+l, rcQuote, false, rowBg))
 				}
 			}
@@ -3178,9 +3186,17 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 // actual reply body, so renderMessages can style the two differently
 // instead of showing them as one indistinguishable block. quote == "" means
 // text isn't a reply.
-func splitQuotedReply(text string) (quote, body string) {
+//
+// wacli prefixes only the quote's first line with "> ", so a multi-line
+// quote can't be delimited by the first newline. When own (the reply's
+// own text, see ownText) is what DisplayText ends with, everything between
+// the "> " and it is the quote; otherwise fall back to the first newline.
+func splitQuotedReply(text, own string) (quote, body string) {
 	if strings.HasPrefix(text, "> ") {
 		rest := text[2:]
+		if own != "" && strings.HasSuffix(rest, "\n"+own) {
+			return strings.TrimRight(rest[:len(rest)-len(own)-1], "\n"), own
+		}
 		if quote, body, ok := strings.Cut(rest, "\n"); ok {
 			return quote, body
 		}
