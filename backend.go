@@ -39,3 +39,27 @@ type Caps struct {
 
 // be is the active backend, chosen in main() before the UI starts.
 var be Backend = wacliBackend{}
+
+// appName is "wtui" (WhatsApp) or "mtui" (Apple Messages), from the name
+// the binary runs as or -backend. It names the config directory
+// (~/.config/<appName>/keys.toml) and log file (~/.<appName>.log), so the
+// two keep separate keybindings.
+var appName = "wtui"
+
+// unsupportedAction reports whether a browse-mode action needs a feature
+// the active backend lacks, and if so a short name for that feature for
+// the "not supported" notice.
+func unsupportedAction(action string) (feature string, unsupported bool) {
+	c := be.Caps()
+	switch action {
+	case "reply":
+		return "Replying to a message", !c.Reply
+	case "react":
+		return "Reacting", !c.React
+	case "delete":
+		return "Deleting messages", !c.Delete
+	case "markChatRead", "markMutedRead":
+		return "Marking chats read", !c.MarkRead
+	}
+	return "", false
+}

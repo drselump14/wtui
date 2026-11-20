@@ -22,7 +22,7 @@ func logPath() string {
 	if err != nil {
 		dir = "."
 	}
-	return filepath.Join(dir, ".wtui.log")
+	return filepath.Join(dir, "."+appName+".log")
 }
 
 // initLogging opens wtui's log file for appending and returns it so main

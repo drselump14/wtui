@@ -170,7 +170,7 @@ func keymapPath() string {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "wtui", "keys.toml")
+	return filepath.Join(dir, appName, "keys.toml")
 }
 
 // loadKeymap builds the active keymap from defaultBindings, with any

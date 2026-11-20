@@ -170,6 +170,21 @@ func extractVideoFrame(path string) (string, error) {
 // actual aspect ratio. Animated WebP stickers decode as their first frame
 // only; x/image/webp doesn't support animation.
 func loadImagePNG(path string) (png_ []byte, w, h int, err error) {
+	// Go can't decode HEIC (iPhone photos in Apple Messages) or TIFF;
+	// macOS's sips converts them to a temporary PNG first.
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".heic", ".heif", ".tif", ".tiff":
+		tmp, err := os.CreateTemp("", "wtui-preview-*.png")
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		tmp.Close()
+		defer os.Remove(tmp.Name())
+		if out, err := exec.Command("sips", "-s", "format", "png", path, "--out", tmp.Name()).CombinedOutput(); err != nil {
+			return nil, 0, 0, fmt.Errorf("sips: %w: %s", err, out)
+		}
+		path = tmp.Name()
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, 0, 0, err

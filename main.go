@@ -539,7 +539,12 @@ type chatMarkedReadMsg struct{ err error }
 
 // markChatReadCmd marks jid as read, so opening a chat clears its unread
 // badge the way it would in the WhatsApp app itself.
+// Backends that can't mark read (Caps.MarkRead) skip it silently, since
+// it's triggered automatically rather than asked for.
 func markChatReadCmd(jid string) tea.Cmd {
+	if !be.Caps().MarkRead {
+		return nil
+	}
 	return func() tea.Msg {
 		return chatMarkedReadMsg{err: be.MarkChatRead(jid)}
 	}
@@ -1671,7 +1676,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.composing:
 			m.input, cmd = m.input.Update(msg)
 			if query, ok := activeMentionQuery(m.input.Value()); ok && textareaAtEnd(m.input) {
-				m.mentionOpen = len(mentionCandidatesFor(m.openMsgs, query)) > 0
+				m.mentionOpen = be.Caps().Mentions && len(mentionCandidatesFor(m.openMsgs, query)) > 0
 				m.mentionSel = 0
 			} else {
 				m.mentionOpen = false
@@ -1900,7 +1905,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmd tea.Cmd
 				m.input, cmd = m.input.Update(msg)
 				if query, ok := activeMentionQuery(m.input.Value()); ok && textareaAtEnd(m.input) {
-					m.mentionOpen = len(mentionCandidatesFor(m.openMsgs, query)) > 0
+					m.mentionOpen = be.Caps().Mentions && len(mentionCandidatesFor(m.openMsgs, query)) > 0
 					m.mentionSel = 0
 				} else {
 					m.mentionOpen = false
@@ -2073,7 +2078,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		switch appKeys.action("browse", key) {
+		action := appKeys.action("browse", key)
+		if feature, ok := unsupportedAction(action); ok {
+			m.notice = feature + " isn't supported by " + be.Name()
+			return m, nil
+		}
+		switch action {
 		case "quit":
 			return m, tea.Quit
 		case "bottom":
@@ -3263,7 +3273,26 @@ func main() {
 	chatJID := flag.String("chat", "", "open directly into this chat (JID), e.g. from a dock/menu-bar widget")
 	initKeys := flag.Bool("init-keys", false, "write every keybinding (defaults plus your current overrides) to the keys.toml config as an editable template, backing up any existing file, then exit")
 	printKeys := flag.Bool("print-keys", false, "print every keybinding in keys.toml format to stdout, then exit")
+	backend := flag.String("backend", "", `chat service: "whatsapp" or "messages" (Apple Messages); defaults to "messages" when run as mtui, else "whatsapp"`)
 	flag.Parse()
+
+	appName = filepath.Base(os.Args[0])
+	if appName != "mtui" {
+		appName = "wtui"
+	}
+	switch *backend {
+	case "":
+		if appName == "mtui" {
+			be = newIMessageBackend()
+		}
+	case "messages", "imessage":
+		be, appName = newIMessageBackend(), "mtui"
+	case "whatsapp":
+		be, appName = wacliBackend{}, "wtui"
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown -backend %q (want whatsapp or messages)\n", *backend)
+		os.Exit(2)
+	}
 
 	if f := initLogging(); f != nil {
 		defer f.Close()
