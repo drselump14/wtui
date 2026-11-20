@@ -240,7 +240,7 @@ type model struct {
 
 func initialModel() model {
 	ti := textarea.New()
-	ti.Placeholder = "message…  (shift+enter / ctrl+j: new line)"
+	ti.Placeholder = "message…  (shift+enter: send)"
 	ti.CharLimit = 4096
 	ti.ShowLineNumbers = false
 	ti.SetHeight(composeRows)
@@ -250,8 +250,9 @@ func initialModel() model {
 		}
 		return "  "
 	})
-	// enter sends (handled in Update); these insert a line break instead.
-	ti.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
+	// Line breaks come from the compose keymap's "newline" action (see
+	// Update), so the textarea's own binding is disabled.
+	ti.KeyMap.InsertNewline = key.NewBinding(key.WithDisabled())
 	taStyles := ti.Styles()
 	taStyles.Focused.CursorLine = lipgloss.NewStyle() // no highlighted cursor row
 	taStyles.Focused.Base = lipgloss.NewStyle()
@@ -1809,7 +1810,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.attachingFile = true
 				m.filePathInput.Reset()
 				return m, m.filePathInput.Focus()
-			case "send":
+			case "newline", "acceptMention":
+				// With the @mention dropdown open, enter/tab pick the
+				// highlighted candidate; otherwise enter inserts a line
+				// break and tab does nothing.
 				if m.mentionOpen {
 					if query, ok := activeMentionQuery(m.input.Value()); ok {
 						if cands := mentionCandidatesFor(m.openMsgs, query); len(cands) > 0 {
@@ -1821,8 +1825,24 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.mentionOpen = false
 				}
-				if key == "tab" {
+				if appKeys.action("compose", key) == "acceptMention" {
 					return m, nil
+				}
+				// InsertRune rather than forwarding the key, so a remapped
+				// "newline" key works without the textarea knowing it.
+				m.input.InsertRune('\n')
+				return m, nil
+			case "send":
+				if m.mentionOpen {
+					if query, ok := activeMentionQuery(m.input.Value()); ok {
+						if cands := mentionCandidatesFor(m.openMsgs, query); len(cands) > 0 {
+							m.acceptMention(cands[m.mentionSel%len(cands)])
+							m.mentionOpen = false
+							m.mentionSel = 0
+							return m, nil
+						}
+					}
+					m.mentionOpen = false
 				}
 				text := strings.TrimSpace(m.input.Value())
 				if m.openJID == "" || (text == "" && m.draftImagePath == "") {
@@ -2356,7 +2376,7 @@ func renderHelp(width, height int) string {
 		{"gg / G", "jump to first / last"},
 		{"ctrl+d / ctrl+u", "half page down / up"},
 		{"ctrl+n / ctrl+p", "next / previous chat (also while composing)"},
-		{"i", "compose a message"},
+		{"i", "compose a message (shift+enter sends, enter adds a new line)"},
 		{"ctrl+v", "paste a clipboard image (while composing)"},
 		{"ctrl+t", "attach a file from this pc: ranger/lf/vifm/nnn if found, else type a path (while composing); a .webp sends as a sticker"},
 		{"@", "mention a sender in this chat (tab/enter picks, ↑/↓ moves)"},
@@ -2374,7 +2394,7 @@ func renderHelp(width, height int) string {
 		{"Y", "copy selected message's id to clipboard (debugging)"},
 		{"/", "search messages in this chat"},
 		{"n / p", "next / previous search match"},
-		{"c / ctrl+/", "search chats (opens a modal)"},
+		{"ctrl+g / ctrl+/", "search chats (opens a modal)"},
 		{"esc / h", "clear in-chat message search"},
 		{"q, ctrl+c", "quit"},
 		{"?", "this help"},
@@ -2462,7 +2482,7 @@ func renderChatSearch(matches []Chat, sel int, searchView string, boxW, width, h
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString(lipgloss.NewStyle().Foreground(rcDim).Render("\n↑/↓ ^n/^p: select · enter: open · esc/ctrl+/: close"))
+	b.WriteString(lipgloss.NewStyle().Foreground(rcDim).Render("\n↑/↓ ^n/^p: select · enter: open · esc/^g: close"))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -2563,7 +2583,7 @@ func (m model) viewContent() string {
 
 	footer := "?: help  q: quit"
 	if m.composing {
-		footer = "enter: send  shift+enter/ctrl+j: new line  ctrl+g: edit in $EDITOR  ctrl+v: paste image  esc: cancel"
+		footer = "shift+enter: send  enter: new line  ctrl+g: edit in $EDITOR  ctrl+v: paste image  esc: cancel"
 	} else if m.msgSearching {
 		footer = m.matchStatus() + "^n/^p: next/prev match  enter: done  esc: cancel"
 	} else if m.msgQuery != "" {
@@ -2794,7 +2814,7 @@ func renderMentionRow(cands []mentionCandidate, sel int) string {
 // the "ctrl+/" chat-search modal (see renderChatSearch), which does its own
 // searching full-screen rather than filtering this list in place.
 func (m model) listBottomLine() string {
-	return lipgloss.NewStyle().Foreground(rcDim).Render("c: search chats")
+	return lipgloss.NewStyle().Foreground(rcDim).Render("^g: search chats")
 }
 
 // inlineImageEscapes returns the kitty graphics escape sequence (invisible,

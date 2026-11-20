@@ -45,7 +45,7 @@ var defaultBindings = []binding{
 	{"browse", "pageUp", []string{"pgup"}},
 	{"browse", "pageDown", []string{"pgdown"}},
 	{"browse", "searchMessages", []string{"/"}},
-	{"browse", "searchChats", []string{"c", "ctrl+/", "ctrl+_"}},
+	{"browse", "searchChats", []string{"ctrl+g", "ctrl+/", "ctrl+_"}},
 	{"browse", "open", []string{"enter", "l", "right"}},
 	{"browse", "openMedia", []string{"o"}},
 	{"browse", "saveMedia", []string{"s"}},
@@ -82,9 +82,15 @@ var defaultBindings = []binding{
 	{"compose", "openEditor", []string{"ctrl+g"}},
 	{"compose", "pasteImage", []string{"ctrl+v"}},
 	{"compose", "attachFile", []string{"ctrl+t"}},
-	{"compose", "send", []string{"tab", "enter"}},
+	// enter is a plain new line (and confirms IME conversions without
+	// sending); shift+enter sends. alt+enter sends too, for terminals
+	// (e.g. a kitty.conf "map shift+enter send_text all \e\r") that turn
+	// shift+enter into alt+enter before wtui sees it.
+	{"compose", "send", []string{"shift+enter", "alt+enter"}},
+	{"compose", "newline", []string{"enter", "ctrl+j"}},
+	{"compose", "acceptMention", []string{"tab"}},
 
-	{"search", "close", []string{"esc", "ctrl+/", "ctrl+_"}},
+	{"search", "close", []string{"esc", "ctrl+g", "ctrl+/", "ctrl+_"}},
 	{"search", "commit", []string{"enter"}},
 	{"search", "prev", []string{"up", "ctrl+p"}},
 	{"search", "next", []string{"down", "ctrl+n"}},
