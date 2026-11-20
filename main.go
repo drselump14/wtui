@@ -1617,7 +1617,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		key := msg.String()
-		if appKeys.action("global", key) == "quit" {
+		if key == "ctrl+c" || appKeys.action("global", key) == "quit" {
 			return m, tea.Quit
 		}
 

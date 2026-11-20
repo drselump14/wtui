@@ -24,11 +24,13 @@ type binding struct {
 
 // defaultBindings is wtui's built-in keymap. Every entry here can be
 // overridden — replacing that action's whole key list — via
-// ~/.wtui.keys.json (see loadKeymap). Two gestures are intentionally left
-// out and stay fixed: ctrl+c always quits (the one key guaranteed to work
-// everywhere, including if a mode's "quit" binding gets misconfigured
-// away), and "g g" (press g twice) jumps to the top, since Update's key
-// handling only resolves single keypresses, not chords.
+// keymapPath (see loadKeymap). Two gestures stay fixed: ctrl+c always
+// quits, even if "global.quit" is overridden without it (Update checks it
+// before the keymap), so a config typo can never leave wtui unquittable;
+// and "g g" (press g twice) jumps to the top, since Update's key handling
+// only resolves single keypresses, not chords. Extra quit keys that work
+// in every mode, including while composing, go in "global":
+// { "global": { "quit": ["ctrl+x"] } }.
 var defaultBindings = []binding{
 	{"global", "quit", []string{"ctrl+c"}},
 
