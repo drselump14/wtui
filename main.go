@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image/color"
 	"maps"
 	"net/url"
 	"os"
@@ -13,12 +14,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -231,25 +232,31 @@ type model struct {
 	// isn't re-fetched and rescanned on every refresh tick.
 	mentionedChats map[string]bool
 	lastUnreadSeen map[string]int
+
+	// lastImgEsc is the kitty image escape output last sent via tea.Raw
+	// (see imageEscapes), so it's only re-sent when it changes.
+	lastImgEsc string
 }
 
 func initialModel() model {
 	ti := textarea.New()
-	ti.Placeholder = "message…  (alt+enter / ctrl+j: new line)"
+	ti.Placeholder = "message…  (shift+enter / ctrl+j: new line)"
 	ti.CharLimit = 4096
 	ti.ShowLineNumbers = false
 	ti.SetHeight(composeRows)
-	ti.SetPromptFunc(2, func(line int) string {
-		if line == 0 {
+	ti.SetPromptFunc(2, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
 			return "› "
 		}
 		return "  "
 	})
 	// enter sends (handled in Update); these insert a line break instead.
-	ti.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
-	ti.FocusedStyle.CursorLine = lipgloss.NewStyle() // no highlighted cursor row
-	ti.FocusedStyle.Base = lipgloss.NewStyle()
-	ti.BlurredStyle.Base = lipgloss.NewStyle()
+	ti.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
+	taStyles := ti.Styles()
+	taStyles.Focused.CursorLine = lipgloss.NewStyle() // no highlighted cursor row
+	taStyles.Focused.Base = lipgloss.NewStyle()
+	taStyles.Blurred.Base = lipgloss.NewStyle()
+	ti.SetStyles(taStyles)
 
 	search := textinput.New()
 	search.Prompt = "/ "
@@ -1128,7 +1135,7 @@ func oldestUnreadIndex(msgs []Message, unread map[string]bool) int {
 // currently selected message.
 func (m *model) rebuildContent() {
 	w := m.msgPaneWidth()
-	m.viewport.Width = w
+	m.viewport.SetWidth(w)
 	content, lineStart := renderMessages(m.openMsgs, w, m.selectedMsg, m.unread, m.sendStatusLabels(), m.reactors)
 	m.msgLineStart = lineStart
 	m.viewport.SetContent(content)
@@ -1143,10 +1150,10 @@ func (m *model) scrollToSelection() {
 	}
 	start := m.msgLineStart[m.selectedMsg]
 	end := m.msgLineStart[m.selectedMsg+1] - 1
-	if start < m.viewport.YOffset {
+	if start < m.viewport.YOffset() {
 		m.viewport.SetYOffset(start)
-	} else if end > m.viewport.YOffset+m.viewport.Height-1 {
-		off := end - m.viewport.Height + 1
+	} else if end > m.viewport.YOffset()+m.viewport.Height()-1 {
+		off := end - m.viewport.Height() + 1
 		if off < 0 {
 			off = 0
 		}
@@ -1229,7 +1236,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// it), and on a chat's first load, which auto-selects the newest
 	// message. Later refreshes that auto-follow the newest message don't
 	// count, so messages arriving while you watch keep their dot.
-	_, isKey := msg.(tea.KeyMsg)
+	_, isKey := msg.(tea.KeyPressMsg)
 	if (isKey || firstLoad) && !nm.focusList && !nm.composing && !nm.chatSearchOpen &&
 		nm.selectedMsg >= 0 && nm.selectedMsg < len(nm.openMsgs) {
 		if id := nm.openMsgs[nm.selectedMsg].MsgID; nm.unread[id] {
@@ -1237,6 +1244,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			nm.rebuildContent()
 			cmd = tea.Batch(cmd, markChatReadCmd(nm.openJID))
 		}
+	}
+	// Bubble Tea v2's cell-based renderer drops escape sequences embedded
+	// in View's content, so the kitty inline image is written out of band
+	// with tea.Raw — and only when it changes, since each emission
+	// re-transmits the whole PNG.
+	if esc := nm.imageEscapes(); esc != nm.lastImgEsc {
+		nm.lastImgEsc = esc
+		cmd = tea.Batch(cmd, tea.Raw(esc))
 	}
 	return nm, cmd
 }
@@ -1326,14 +1341,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			vpH = 3
 		}
 		if !m.ready {
-			m.viewport = viewport.New(vpW, vpH)
+			m.viewport = viewport.New(viewport.WithWidth(vpW), viewport.WithHeight(vpH))
 			m.ready = true
 		} else {
-			m.viewport.Width = vpW
-			m.viewport.Height = vpH
+			m.viewport.SetWidth(vpW)
+			m.viewport.SetHeight(vpH)
 		}
 		m.input.SetWidth(vpW)
-		m.search.Width = listWidth - len(m.search.Prompt) - 1
+		m.search.SetWidth(listWidth - len(m.search.Prompt) - 1)
 		return m, m.loadSelectedImage()
 
 	case tickMsg:
@@ -1615,7 +1630,34 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.PasteMsg:
+		// Bubble Tea v2 delivers bracketed paste as its own message rather
+		// than a key, so route it to whichever text input has focus, with
+		// the same follow-up each input's typing branch does.
+		var cmd tea.Cmd
+		switch {
+		case m.err != "" || m.notice != "" || m.showHelp || m.showReactors:
+		case m.composing && m.attachingFile:
+			m.filePathInput, cmd = m.filePathInput.Update(msg)
+		case m.composing:
+			m.input, cmd = m.input.Update(msg)
+			if query, ok := activeMentionQuery(m.input.Value()); ok && textareaAtEnd(m.input) {
+				m.mentionOpen = len(mentionCandidatesFor(m.openMsgs, query)) > 0
+				m.mentionSel = 0
+			} else {
+				m.mentionOpen = false
+			}
+		case m.chatSearchOpen:
+			m.search, cmd = m.search.Update(msg)
+			m.chatSearchSel = 0
+		case m.msgSearching:
+			m.search, cmd = m.search.Update(msg)
+			m.msgQuery = m.search.Value()
+			m.jumpToMessageMatch(max(m.selectedMsg, 0), m.msgQuery)
+		}
+		return m, cmd
+
+	case tea.KeyPressMsg:
 		key := msg.String()
 		if key == "ctrl+c" || appKeys.action("global", key) == "quit" {
 			return m, tea.Quit
@@ -2427,7 +2469,7 @@ func renderChatSearch(matches []Chat, sel int, searchView string, boxW, width, h
 		BorderForeground(rcDim).
 		Background(rcBg).
 		Padding(1, 2).
-		Width(boxW).
+		Width(boxW + 2). // lipgloss v2 counts the border in Width
 		Render(b.String())
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
@@ -2472,7 +2514,15 @@ func renderReactors(tabs []reactorTab, tabSel, nameSel, width, height int) strin
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
-func (m model) View() string {
+// View wraps viewContent in Bubble Tea v2's declarative tea.View:
+// fullscreen (alt screen) for the app's whole lifetime.
+func (m model) View() tea.View {
+	v := tea.NewView(m.viewContent())
+	v.AltScreen = true
+	return v
+}
+
+func (m model) viewContent() string {
 	if !m.ready {
 		return "loading…"
 	}
@@ -2484,7 +2534,7 @@ func (m model) View() string {
 	}
 	if m.chatSearchOpen {
 		boxW := min(m.width-4, 50)
-		m.search.Width = boxW - len(m.search.Prompt) - 1
+		m.search.SetWidth(boxW - len(m.search.Prompt) - 1)
 		matches := matchingChats(m.chats, m.search.Value())
 		if m.chatSearchSel >= len(matches) {
 			m.chatSearchSel = max(len(matches)-1, 0)
@@ -2498,8 +2548,9 @@ func (m model) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor(!m.focusList)).
 		Background(rcBg).
-		Width(m.msgPaneWidth()).
-		Height(m.height - 4).
+		// lipgloss v2 counts the border in Width/Height, hence the +2s.
+		Width(m.msgPaneWidth() + 2).
+		Height(m.height - 4 + 2).
 		Render(m.headerFor(m.openJID) + "\n" + m.titleDivider() + "\n" + m.viewport.View() + "\n" + m.sendBoxView())
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, listPane, msgPane)
@@ -2512,7 +2563,7 @@ func (m model) View() string {
 
 	footer := "?: help  q: quit"
 	if m.composing {
-		footer = "enter: send  alt+enter/ctrl+j: new line  ctrl+g: edit in $EDITOR  ctrl+v: paste image  esc: cancel"
+		footer = "enter: send  shift+enter/ctrl+j: new line  ctrl+g: edit in $EDITOR  ctrl+v: paste image  esc: cancel"
 	} else if m.msgSearching {
 		footer = m.matchStatus() + "^n/^p: next/prev match  enter: done  esc: cancel"
 	} else if m.msgQuery != "" {
@@ -2532,14 +2583,6 @@ func (m model) View() string {
 	// One row only: a wrapped footer would push the layout (and the inline
 	// image's absolute position) down a line.
 	footer = ansi.Truncate(footer, m.width, "…")
-	if m.err != "" || m.notice != "" {
-		// Drop the inline image so it isn't drawn over the popup.
-		if kittySupported() {
-			footer += kittyDeleteImage(1)
-		}
-	} else {
-		footer += m.inlineImageEscapes()
-	}
 	footerStyle := lipgloss.NewStyle().Foreground(rcDim).Width(m.width)
 
 	screen := body + "\n" + taskLine + "\n" + footerStyle.Render(footer)
@@ -2553,7 +2596,7 @@ func (m model) View() string {
 
 // renderPopup renders msg as a bordered box for overlayCenter, titled and
 // colored by accent (red for m.err, green for m.notice).
-func (m model) renderPopup(msg, title string, accent lipgloss.Color) string {
+func (m model) renderPopup(msg, title string, accent color.Color) string {
 	maxW := m.width * 2 / 3
 	if maxW < 20 {
 		maxW = m.width - 4
@@ -2628,13 +2671,13 @@ func (m model) sendBoxView() string {
 	replyLine := "\n"
 	switch {
 	case m.composing && m.attachingFile:
-		m.filePathInput.Width = m.msgPaneWidth() - len(m.filePathInput.Prompt) - 1
+		m.filePathInput.SetWidth(m.msgPaneWidth() - len(m.filePathInput.Prompt) - 1)
 		replyLine = m.filePathInput.View() + "\n"
 	case m.composing && m.mentionOpen:
 		query, _ := activeMentionQuery(m.input.Value())
 		replyLine = renderMentionRow(mentionCandidatesFor(m.openMsgs, query), m.mentionSel) + "\n"
 	case m.msgSearching:
-		m.search.Width = m.msgPaneWidth() - len(m.search.Prompt) - 1
+		m.search.SetWidth(m.msgPaneWidth() - len(m.search.Prompt) - 1)
 		replyLine = m.search.View() + "\n"
 	case m.replyToID != "" || m.draftImagePath != "":
 		var parts []string
@@ -2765,6 +2808,20 @@ func (m model) listBottomLine() string {
 // whenever that happens — and skipped otherwise. It always clears the
 // previous image first, so switching away from an image message (or
 // scrolling its box off-screen) doesn't leave stale pixels.
+// imageEscapes is the kitty graphics output the current screen calls for:
+// the selected message's inline image on the main view, or just a delete
+// of any previous one when a popup or full-screen overlay covers it (so it
+// isn't drawn over them). Update emits it via tea.Raw whenever it changes.
+func (m model) imageEscapes() string {
+	if !kittySupported() {
+		return ""
+	}
+	if !m.ready || m.showReactors || m.showHelp || m.chatSearchOpen || m.err != "" || m.notice != "" {
+		return kittyDeleteImage(1)
+	}
+	return m.inlineImageEscapes()
+}
+
 func (m model) inlineImageEscapes() string {
 	if !kittySupported() {
 		return ""
@@ -2782,13 +2839,13 @@ func (m model) inlineImageEscapes() string {
 		return b.String()
 	}
 	boxLine := m.msgLineStart[m.selectedMsg] + 2 // header line + marker line
-	rel := boxLine - m.viewport.YOffset
-	if rel < 0 || rel >= m.viewport.Height {
+	rel := boxLine - m.viewport.YOffset()
+	if rel < 0 || rel >= m.viewport.Height() {
 		return b.String()
 	}
 	availRows := imageBoxRows
-	if rel+availRows > m.viewport.Height {
-		availRows = m.viewport.Height - rel
+	if rel+availRows > m.viewport.Height() {
+		availRows = m.viewport.Height() - rel
 	}
 	if availRows < 1 {
 		return b.String()
@@ -2830,7 +2887,7 @@ func (m model) titleDivider() string {
 		Render(strings.Repeat("─", w))
 }
 
-func borderColor(active bool) lipgloss.Color {
+func borderColor(active bool) color.Color {
 	if active {
 		return rcGreen
 	}
@@ -2902,8 +2959,9 @@ func renderChatList(chats []Chat, cursor int, openJID string, focused bool, widt
 		Border(border).
 		BorderForeground(borderColor(focused)).
 		Background(rcBg).
-		Width(width).
-		Height(height).
+		// lipgloss v2 counts the border in Width/Height, hence the +2s.
+		Width(width + 2).
+		Height(height + 2).
 		Render(content)
 }
 
@@ -2952,7 +3010,7 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 	// bare, unstyled reset-then-spaces, so a row with no text (the
 	// blank line between messages) would otherwise show no background
 	// at all across its full width.
-	row := func(s string, fg lipgloss.Color, bold bool, bg lipgloss.Color) string {
+	row := func(s string, fg color.Color, bold bool, bg color.Color) string {
 		st := lipgloss.NewStyle().Foreground(fg).Background(bg).Width(width)
 		if bold {
 			st = st.Bold(true)
@@ -3131,7 +3189,7 @@ func main() {
 
 	m := initialModel()
 	m.startJID = *chatJID
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
