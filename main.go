@@ -3033,12 +3033,18 @@ func captionAwareText(msg Message) string {
 
 // ownText is the part of msg's DisplayText that the sender actually wrote
 // (as opposed to wacli's "> quoted" reply header), used to find where a
-// multi-line quote ends: the caption for captioned media, else Text.
+// multi-line quote ends: the caption for captioned media, else Text, else
+// (caption-less media, whose Text is empty) wacli's generic "Sent <type>".
 func ownText(msg Message) string {
-	if msg.MediaType != "" && msg.MediaCaption != "" {
+	switch {
+	case msg.MediaType != "" && msg.MediaCaption != "":
 		return msg.MediaCaption
+	case msg.Text != "":
+		return msg.Text
+	case msg.MediaType != "":
+		return "Sent " + msg.MediaType
 	}
-	return msg.Text
+	return ""
 }
 
 func renderMessages(msgs []Message, width int, selectedIdx int, unread map[string]bool, status map[string]sendLabel, reactors map[string][]reactionDetail) (string, []int) {

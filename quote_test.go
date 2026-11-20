@@ -34,3 +34,16 @@ func TestCaptionAwareTextMultiLineQuote(t *testing.T) {
 		t.Errorf("captionAwareText = %q, want %q", got, want)
 	}
 }
+
+// Caption-less media replies have empty Text; the quote must still end
+// right before wacli's "Sent <type>" line.
+func TestOwnTextCaptionlessMediaReply(t *testing.T) {
+	msg := Message{
+		DisplayText: "> first line \n\nsecond line\nSent sticker",
+		MediaType:   "sticker",
+	}
+	q, b := splitQuotedReply(captionAwareText(msg), ownText(msg))
+	if q != "first line \n\nsecond line" || b != "Sent sticker" {
+		t.Errorf("got (%q, %q)", q, b)
+	}
+}
