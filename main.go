@@ -3242,12 +3242,30 @@ func truncate(s string, n int) string {
 
 func main() {
 	chatJID := flag.String("chat", "", "open directly into this chat (JID), e.g. from a dock/menu-bar widget")
+	initKeys := flag.Bool("init-keys", false, "write every keybinding (defaults plus your current overrides) to the keys.toml config as an editable template, backing up any existing file, then exit")
+	printKeys := flag.Bool("print-keys", false, "print every keybinding in keys.toml format to stdout, then exit")
 	flag.Parse()
 
 	if f := initLogging(); f != nil {
 		defer f.Close()
 	}
 	appKeys = loadKeymap()
+	if *printKeys {
+		fmt.Print(keymapTOML(appKeys))
+		return
+	}
+	if *initKeys {
+		path, bak, err := initKeymapFile(appKeys)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		if bak != "" {
+			fmt.Println("backed up", bak)
+		}
+		fmt.Println("wrote", path)
+		return
+	}
 
 	m := initialModel()
 	m.startJID = *chatJID
