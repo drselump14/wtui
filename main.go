@@ -1380,7 +1380,20 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = ""
+		// Keep the cursor on the same chat, not the same row: a refresh
+		// reorders the list (e.g. sending moves that chat to the top), and
+		// an index-based cursor would leave the highlight on whichever
+		// chat now occupies the old row.
+		cursorJID := ""
+		if vis := m.visibleChats(); m.cursor >= 0 && m.cursor < len(vis) {
+			cursorJID = vis[m.cursor].JID
+		}
 		m.chats = msg.chats
+		if cursorJID != "" {
+			if i := slices.IndexFunc(m.visibleChats(), func(c Chat) bool { return c.JID == cursorJID }); i >= 0 {
+				m.cursor = i
+			}
+		}
 
 		// Re-scan only chats whose unread count changed since last checked,
 		// and drop the mention flag for chats that are no longer unread.
