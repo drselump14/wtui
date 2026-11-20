@@ -28,7 +28,7 @@ type mediaDownloadResult struct {
 	Path string `json:"path"`
 }
 
-func downloadMedia(chatJID, msgID string) (string, error) {
+func (wacliBackend) DownloadMedia(chatJID, msgID string) (string, error) {
 	var env envelope[mediaDownloadResult]
 	if err := runWacli(&env, "media", "download", "--chat", chatJID, "--id", msgID); err != nil {
 		return "", err
@@ -50,7 +50,7 @@ func downloadMedia(chatJID, msgID string) (string, error) {
 // extension picked from mimeType — not the cached file's own basename,
 // which wacli names things like "message-<ID>.jfif" for a plain JPEG.
 func saveMediaToDownloads(chatJID, msgID, filename, mimeType string) (string, error) {
-	src, err := downloadMedia(chatJID, msgID)
+	src, err := be.DownloadMedia(chatJID, msgID)
 	if err != nil {
 		return "", err
 	}

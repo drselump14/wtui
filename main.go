@@ -323,7 +323,7 @@ func tick() tea.Cmd {
 
 func loadChats() tea.Cmd {
 	return func() tea.Msg {
-		chats, err := fetchChats()
+		chats, err := be.FetchChats()
 		return chatsLoadedMsg{chats: chats, err: err}
 	}
 }
@@ -333,7 +333,7 @@ func loadChats() tea.Cmd {
 // an ordinary unread message.
 func loadOwnMentionIDs() tea.Cmd {
 	return func() tea.Msg {
-		ids, err := fetchOwnMentionIDs()
+		ids, err := be.FetchOwnMentionIDs()
 		return ownMentionIDsMsg{ids: ids, err: err}
 	}
 }
@@ -352,7 +352,7 @@ func checkMentions(toCheck map[string]int, ownIDs map[string]bool) tea.Cmd {
 			if limit > 100 {
 				limit = 100
 			}
-			msgs, err := fetchMessages(jid, limit)
+			msgs, err := be.FetchMessages(jid, limit)
 			if err != nil {
 				continue
 			}
@@ -385,7 +385,7 @@ func checkMentions(toCheck map[string]int, ownIDs map[string]bool) tea.Cmd {
 // main goroutine, so it can't write to the model directly).
 func loadMessages(jid string, known map[string]string) tea.Cmd {
 	return func() tea.Msg {
-		msgs, err := fetchMessages(jid, msgLimit)
+		msgs, err := be.FetchMessages(jid, msgLimit)
 		if err != nil {
 			return messagesLoadedMsg{jid: jid, err: err}
 		}
@@ -425,7 +425,7 @@ func loadMessages(jid string, known map[string]string) tea.Cmd {
 				}
 			}
 		}
-		names, _ := resolveMentionNames(need) // best-effort: unresolved mentions just show their raw ID
+		names, _ := be.ResolveMentionNames(need) // best-effort: unresolved mentions just show their raw ID
 
 		all := known
 		if len(names) > 0 {
@@ -442,7 +442,7 @@ func loadMessages(jid string, known map[string]string) tea.Cmd {
 
 func loadImage(jid, msgID, mediaType string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := downloadMedia(jid, msgID)
+		path, err := be.DownloadMedia(jid, msgID)
 		if err != nil {
 			return imageLoadedMsg{jid: jid, msgID: msgID, err: err}
 		}
@@ -506,7 +506,7 @@ func (m model) sendReaction(id int, targetID, emoji string) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		return reactSentMsg{id: id, err: sendReact(jid, targetID, senderJID, emoji)}
+		return reactSentMsg{id: id, err: be.SendReact(jid, targetID, senderJID, emoji)}
 	}
 }
 
@@ -526,7 +526,7 @@ func (m model) confirmDelete(forMe bool) (model, tea.Cmd) {
 	seq := m.delSeq
 	m.delSends = append(m.delSends, seq)
 	cmd := func() tea.Msg {
-		return deleteSentMsg{id: seq, err: deleteMessage(jid, id, forMe)}
+		return deleteSentMsg{id: seq, err: be.DeleteMessage(jid, id, forMe)}
 	}
 	if !m.sendTicking {
 		m.sendTicking = true
@@ -541,7 +541,7 @@ type chatMarkedReadMsg struct{ err error }
 // badge the way it would in the WhatsApp app itself.
 func markChatReadCmd(jid string) tea.Cmd {
 	return func() tea.Msg {
-		return chatMarkedReadMsg{err: markChatRead(jid)}
+		return chatMarkedReadMsg{err: be.MarkChatRead(jid)}
 	}
 }
 
@@ -563,7 +563,7 @@ func markChatsReadCmd(jids []string) tea.Cmd {
 		var failed []string
 		marked := 0
 		for _, jid := range jids {
-			if err := markChatRead(jid); err != nil {
+			if err := be.MarkChatRead(jid); err != nil {
 				failed = append(failed, err.Error())
 				continue
 			}
@@ -808,7 +808,7 @@ type enlargeResultMsg struct{ err error }
 // separate window.
 func enlargeImage(jid, msgID string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := downloadMedia(jid, msgID)
+		path, err := be.DownloadMedia(jid, msgID)
 		if err != nil {
 			return enlargeResultMsg{err: err}
 		}
@@ -915,7 +915,7 @@ func canStreamVideo() bool {
 // macOS app for its type (Preview for PDFs, Music for audio, …).
 func openMedia(jid, msgID string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := downloadMedia(jid, msgID)
+		path, err := be.DownloadMedia(jid, msgID)
 		if err != nil {
 			return videoResultMsg{err: err}
 		}
@@ -972,7 +972,7 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 // then plays it, in a kitty split pane when possible.
 func playVideo(jid, msgID string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := downloadMedia(jid, msgID)
+		path, err := be.DownloadMedia(jid, msgID)
 		if err != nil {
 			return videoResultMsg{err: err}
 		}

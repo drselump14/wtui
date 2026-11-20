@@ -56,6 +56,15 @@ type Message struct {
 	ReactionEmoji string `json:"ReactionEmoji"`
 }
 
+// wacliBackend is the WhatsApp Backend, driving the wacli CLI.
+type wacliBackend struct{}
+
+func (wacliBackend) Name() string { return "WhatsApp" }
+
+func (wacliBackend) Caps() Caps {
+	return Caps{Reply: true, React: true, Delete: true, MarkRead: true, Mentions: true, Stickers: true}
+}
+
 type envelope[T any] struct {
 	Success bool    `json:"success"`
 	Data    T       `json:"data"`
@@ -97,7 +106,7 @@ func runWacli(out any, args ...string) error {
 	return json.Unmarshal(stdout, out)
 }
 
-func fetchChats() ([]Chat, error) {
+func (wacliBackend) FetchChats() ([]Chat, error) {
 	var env envelope[[]Chat]
 	if err := runWacli(&env, "chats", "list", "--no-archived", "--limit", "200"); err != nil {
 		return nil, err
@@ -119,7 +128,7 @@ func fetchChats() ([]Chat, error) {
 // fetchMessages returns the latest `limit` messages for chatJID, oldest first
 // (ready to render top-to-bottom). wacli's default sort is newest-first, so
 // we fetch that way (to get the *latest* N) then reverse for display.
-func fetchMessages(chatJID string, limit int) ([]Message, error) {
+func (wacliBackend) FetchMessages(chatJID string, limit int) ([]Message, error) {
 	var env envelope[messagesPage]
 	if err := runWacli(&env, "messages", "list", "--chat", chatJID, "--limit", fmt.Sprint(limit)); err != nil {
 		return nil, err
@@ -152,7 +161,7 @@ const delegatedLockWait = "500ms"
 
 // markChatRead marks chatJID as read, sending real read receipts for its
 // synced unread messages (per wacli's own read-receipt privacy setting).
-func markChatRead(chatJID string) error {
+func (wacliBackend) MarkChatRead(chatJID string) error {
 	var env envelope[any]
 	if err := runWacli(&env, "chats", "mark-read", "--chat", chatJID, "--receipts", "--lock-wait", delegatedLockWait); err != nil {
 		return err
@@ -170,7 +179,7 @@ func markChatRead(chatJID string) error {
 // always passed: wacli otherwise refuses a text send to the linked
 // account's own chat (its "Message Yourself" delivery ack is unreliable,
 // but wtui has no separate chat kind to special-case here).
-func sendText(chatJID, text, replyTo string, mentions []string) error {
+func (wacliBackend) SendText(chatJID, text, replyTo string, mentions []string) error {
 	args := []string{"send", "text", "--to", chatJID, "--message", text, "--lock-wait", delegatedLockWait, "--allow-self"}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
@@ -192,7 +201,7 @@ func sendText(chatJID, text, replyTo string, mentions []string) error {
 // and typed automatically by wacli. If caption is non-empty it's attached
 // as the media's caption; if replyTo is non-empty, the message is sent as
 // a quoted reply to that MsgID.
-func sendFile(chatJID, path, caption, replyTo string) error {
+func (wacliBackend) SendFile(chatJID, path, caption, replyTo string) error {
 	args := []string{"send", "file", "--to", chatJID, "--file", path, "--lock-wait", delegatedLockWait}
 	if caption != "" {
 		args = append(args, "--caption", caption)
@@ -213,7 +222,7 @@ func sendFile(chatJID, path, caption, replyTo string) error {
 // sendSticker sends path (a WebP image) to chatJID as a sticker. Unlike
 // sendFile, wacli's sticker send has no --caption flag — WhatsApp stickers
 // can't carry one.
-func sendSticker(chatJID, path, replyTo string) error {
+func (wacliBackend) SendSticker(chatJID, path, replyTo string) error {
 	args := []string{"send", "sticker", "--to", chatJID, "--file", path, "--lock-wait", delegatedLockWait}
 	if replyTo != "" {
 		args = append(args, "--reply-to", replyTo)
@@ -231,7 +240,7 @@ func sendSticker(chatJID, path, replyTo string) error {
 // sendReact sends (or, with emoji == "", removes) a reaction to msgID in
 // chatJID. senderJID is the target message's original sender and is
 // required by wacli for group chats; it's ignored for 1:1 chats.
-func sendReact(chatJID, msgID, senderJID, emoji string) error {
+func (wacliBackend) SendReact(chatJID, msgID, senderJID, emoji string) error {
 	args := []string{"send", "react", "--to", chatJID, "--id", msgID, "--reaction", emoji, "--lock-wait", delegatedLockWait}
 	if senderJID != "" {
 		args = append(args, "--sender", senderJID)
@@ -250,7 +259,7 @@ func sendReact(chatJID, msgID, senderJID, emoji string) error {
 // without --for-me, which only works for a message FromMe) or, with forMe
 // true, just from this account's own local view (any message, revoked or
 // not, is removed locally either way).
-func deleteMessage(chatJID, msgID string, forMe bool) error {
+func (wacliBackend) DeleteMessage(chatJID, msgID string, forMe bool) error {
 	args := []string{"messages", "delete", "--chat", chatJID, "--id", msgID, "--lock-wait", writeLockWait}
 	if forMe {
 		args = append(args, "--for-me")
@@ -281,7 +290,7 @@ type mentionResolution struct {
 // wacli can't resolve under either interpretation, or resolves but has no
 // saved name for, are simply omitted from the result — the caller falls
 // back to showing the raw ID for those.
-func resolveMentionNames(ids []string) (map[string]string, error) {
+func (wacliBackend) ResolveMentionNames(ids []string) (map[string]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -313,7 +322,7 @@ func resolveMentionNames(ids []string) (map[string]string, error) {
 // client happened to use. The LID lookup is best-effort — if it fails, the
 // phone number alone is still returned, since that's enough to catch most
 // mentions.
-func fetchOwnMentionIDs() (map[string]bool, error) {
+func (wacliBackend) FetchOwnMentionIDs() (map[string]bool, error) {
 	var env envelope[struct {
 		LinkedJID string `json:"linked_jid"`
 	}]

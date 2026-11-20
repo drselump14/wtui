@@ -155,16 +155,16 @@ func (m *model) startNextSend() tea.Cmd {
 			if mediaPath != "" {
 				var err error
 				if sticker {
-					err = sendSticker(jid, mediaPath, replyTo)
+					err = be.SendSticker(jid, mediaPath, replyTo)
 				} else {
-					err = sendFile(jid, mediaPath, text, replyTo)
+					err = be.SendFile(jid, mediaPath, text, replyTo)
 				}
 				if err == nil && mediaOwned {
 					os.Remove(mediaPath) // wacli has read it; no longer needed
 				}
 				return pendingSentMsg{id: id, err: err}
 			}
-			return pendingSentMsg{id: id, err: sendText(jid, text, replyTo, mentions)}
+			return pendingSentMsg{id: id, err: be.SendText(jid, text, replyTo, mentions)}
 		}
 		if m.sendTicking {
 			return send
