@@ -66,7 +66,7 @@ var defaultBindings = []binding{
 	{"browse", "retrySend", []string{"R"}},
 	{"browse", "dismissFailedSend", []string{"x"}},
 	{"browse", "jumpToQuoted", []string{"f"}},
-	{"browse", "switchChat", []string{"ctrl+n", "ctrl+p"}},
+	{"browse", "switchChat", []string{"ctrl+n", "ctrl+p", "J", "K"}},
 	{"browse", "nextMatch", []string{"n"}},
 	{"browse", "prevMatch", []string{"p", "N"}},
 	{"browse", "clearFilter", []string{"h", "left", "esc"}},

@@ -2379,7 +2379,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.loadSelectedImage()
 		case "switchChat":
-			return m.stepChat(key == "ctrl+n")
+			return m.stepChat(key == "ctrl+n" || key == "J")
 		case "nextMatch":
 			if m.msgQuery == "" {
 				return m, nil
