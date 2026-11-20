@@ -2332,7 +2332,7 @@ func renderHelp(width, height int) string {
 		{"Y", "copy selected message's id to clipboard (debugging)"},
 		{"/", "search messages in this chat"},
 		{"n / p", "next / previous search match"},
-		{"ctrl+/", "search chats (opens a modal)"},
+		{"c / ctrl+/", "search chats (opens a modal)"},
 		{"esc / h", "clear in-chat message search"},
 		{"q, ctrl+c", "quit"},
 		{"?", "this help"},
@@ -2386,17 +2386,33 @@ func renderChatSearch(matches []Chat, sel int, searchView string, boxW, width, h
 			start = sel - rows + 1
 		}
 		end := min(start+rows, len(matches))
-		nameW := boxW - 7
+		nameW := boxW - 10
+		if nameW < 4 {
+			nameW = 4
+		}
 		for i := start; i < end; i++ {
 			c := matches[i]
+			// Row format and unread/muted coloring match the sidebar's
+			// renderChatList exactly, minus its mention (@) badge, which
+			// has no equivalent here.
 			icon := "👤"
 			if c.Kind == "group" {
 				icon = "👥"
 			} else if c.Kind == "newsletter" || c.Kind == "channel" {
 				icon = "📢"
 			}
-			line := fmt.Sprintf("%s %-*s", icon, nameW, truncate(c.Name, nameW))
+			badge := ""
+			if c.UnreadCount > 0 {
+				badge = fmt.Sprintf(" (%d)", c.UnreadCount)
+			}
+			line := fmt.Sprintf("%s %-*s%s", icon, nameW, truncate(c.Name, nameW), badge)
 			style := lipgloss.NewStyle().Foreground(rcFg)
+			switch {
+			case c.UnreadCount > 0 && c.Muted():
+				style = style.Foreground(rcDim)
+			case c.UnreadCount > 0:
+				style = style.Foreground(rcYellow)
+			}
 			if i == sel {
 				style = style.Background(rcSelection)
 			}
@@ -2735,7 +2751,7 @@ func renderMentionRow(cands []mentionCandidate, sel int) string {
 // the "ctrl+/" chat-search modal (see renderChatSearch), which does its own
 // searching full-screen rather than filtering this list in place.
 func (m model) listBottomLine() string {
-	return lipgloss.NewStyle().Foreground(rcDim).Render("ctrl+/: search chats")
+	return lipgloss.NewStyle().Foreground(rcDim).Render("c: search chats")
 }
 
 // inlineImageEscapes returns the kitty graphics escape sequence (invisible,

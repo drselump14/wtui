@@ -43,7 +43,7 @@ var defaultBindings = []binding{
 	{"browse", "pageUp", []string{"pgup"}},
 	{"browse", "pageDown", []string{"pgdown"}},
 	{"browse", "searchMessages", []string{"/"}},
-	{"browse", "searchChats", []string{"ctrl+/", "ctrl+_"}},
+	{"browse", "searchChats", []string{"c", "ctrl+/", "ctrl+_"}},
 	{"browse", "open", []string{"enter", "l", "right"}},
 	{"browse", "openMedia", []string{"o"}},
 	{"browse", "saveMedia", []string{"s"}},
