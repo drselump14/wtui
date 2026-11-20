@@ -310,7 +310,7 @@ func (m *model) mergePending() {
 }
 
 // sendStatusLabels maps placeholder MsgIDs to the status shown after
-// their header ("⠋ sending…", "✗ failed: …").
+// their header ("⠋", "✗ failed: …").
 func (m model) sendStatusLabels() map[string]sendLabel {
 	if len(m.pending) == 0 {
 		return nil
@@ -321,7 +321,7 @@ func (m model) sendStatusLabels() map[string]sendLabel {
 		case sendQueued:
 			out[p.id] = sendLabel{text: "◷ queued"}
 		case sendInFlight:
-			out[p.id] = sendLabel{text: spinnerFrames[m.sendFrame] + " sending…"}
+			out[p.id] = sendLabel{text: spinnerFrames[m.sendFrame]}
 		case sendDone:
 			out[p.id] = sendLabel{text: "✓ sent"}
 		case sendFailed:
