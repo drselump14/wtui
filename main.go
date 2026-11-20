@@ -36,6 +36,7 @@ var (
 	rcDim          = lipgloss.Color("#5F5A60") // comments, timestamps, footer
 	rcSelection    = lipgloss.Color("#5A647E") // chat-list cursor row background (railscast visual-select blue)
 	rcMsgSelection = lipgloss.Color("#363A40") // selected message row background
+	rcInputBg      = lipgloss.Color("#3A3A3A") // compose box fill
 	rcBorder       = lipgloss.Color("#4B4B4B") // inactive pane border
 	rcGreen        = lipgloss.Color("#A5C261") // active border
 	rcYellow       = lipgloss.Color("#FFC66D") // unread badges
@@ -244,19 +245,26 @@ func initialModel() model {
 	ti.CharLimit = 4096
 	ti.ShowLineNumbers = false
 	ti.SetHeight(composeRows)
-	ti.SetPromptFunc(2, func(info textarea.PromptInfo) string {
-		if info.LineNumber == 0 {
-			return "› "
-		}
-		return "  "
-	})
+	// The "›" prompt is drawn outside the box by sendBoxView, so the
+	// textarea itself has none.
+	ti.Prompt = ""
 	// Line breaks come from the compose keymap's "newline" action (see
 	// Update), so the textarea's own binding is disabled.
 	ti.KeyMap.InsertNewline = key.NewBinding(key.WithDisabled())
+	// A filled box with one column of padding on each side, so the text
+	// doesn't touch its edges. Every inner style sets the fill too: each
+	// one ends in an SGR reset that would otherwise drop back to the
+	// terminal's default background mid-row.
 	taStyles := ti.Styles()
-	taStyles.Focused.CursorLine = lipgloss.NewStyle() // no highlighted cursor row
-	taStyles.Focused.Base = lipgloss.NewStyle()
-	taStyles.Blurred.Base = lipgloss.NewStyle()
+	fill := lipgloss.NewStyle().Background(rcInputBg)
+	for _, st := range []*textarea.StyleState{&taStyles.Focused, &taStyles.Blurred} {
+		st.Base = fill.Padding(0, composePadding)
+		st.Text = fill.Foreground(rcFg)
+		st.CursorLine = fill.Foreground(rcFg) // no highlighted cursor row
+		st.Placeholder = fill.Foreground(rcDim)
+		st.EndOfBuffer = fill.Foreground(rcInputBg)
+		st.Prompt = fill
+	}
 	ti.SetStyles(taStyles)
 
 	search := textinput.New()
@@ -777,6 +785,13 @@ func expandUserPath(path string) string {
 
 // composeRows is the send box's height in text rows.
 const composeRows = 4
+
+// composePadding is the blank columns inside the compose box on each side
+// of the text; composePrompt is the "› " column drawn left of the box.
+const (
+	composePadding = 1
+	composePromptW = 2
+)
 
 // flattenPreview collapses multi-line text onto one line (used for the
 // reply banner), marking the line breaks.
@@ -1348,7 +1363,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.SetWidth(vpW)
 			m.viewport.SetHeight(vpH)
 		}
-		m.input.SetWidth(vpW)
+		m.input.SetWidth(max(vpW-composePromptW, 10))
 		m.search.SetWidth(listWidth - len(m.search.Prompt) - 1)
 		return m, m.loadSelectedImage()
 
@@ -2394,7 +2409,7 @@ func renderHelp(width, height int) string {
 		{"Y", "copy selected message's id to clipboard (debugging)"},
 		{"/", "search messages in this chat"},
 		{"n / p", "next / previous search match"},
-		{"ctrl+g / ctrl+/", "search chats (opens a modal)"},
+		{keyHint("browse", "searchChats", "^g"), "search chats (opens a modal)"},
 		{"esc / h", "clear in-chat message search"},
 		{"q, ctrl+c", "quit"},
 		{"?", "this help"},
@@ -2482,7 +2497,7 @@ func renderChatSearch(matches []Chat, sel int, searchView string, boxW, width, h
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString(lipgloss.NewStyle().Foreground(rcDim).Render("\n↑/↓ ^n/^p: select · enter: open · esc/^g: close"))
+	b.WriteString(lipgloss.NewStyle().Foreground(rcDim).Render("\n↑/↓ ^n/^p: select · enter: open · esc: close"))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -2718,7 +2733,18 @@ func (m model) sendBoxView() string {
 		replyLine = strings.Join(parts, "   ") + "\n"
 	}
 	if m.composing {
-		return replyLine + m.input.View()
+		// "› " beside the box's first row, blank beside the rest, both on
+		// the pane background so only the box itself is filled.
+		prompt := lipgloss.NewStyle().Background(rcBg).Foreground(rcFg)
+		lines := strings.Split(m.input.View(), "\n")
+		for i, l := range lines {
+			p := "  "
+			if i == 0 {
+				p = "› "
+			}
+			lines[i] = prompt.Render(p) + l
+		}
+		return replyLine + strings.Join(lines, "\n")
 	}
 	hint := ""
 	if m.openJID != "" {
@@ -2814,7 +2840,7 @@ func renderMentionRow(cands []mentionCandidate, sel int) string {
 // the "ctrl+/" chat-search modal (see renderChatSearch), which does its own
 // searching full-screen rather than filtering this list in place.
 func (m model) listBottomLine() string {
-	return lipgloss.NewStyle().Foreground(rcDim).Render("^g: search chats")
+	return lipgloss.NewStyle().Foreground(rcDim).Render(keyHint("browse", "searchChats", "^g") + ": search chats")
 }
 
 // inlineImageEscapes returns the kitty graphics escape sequence (invisible,

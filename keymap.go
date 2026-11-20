@@ -1,10 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 // appKeys is the active keymap, loaded once in main() before the Bubble
@@ -29,8 +31,8 @@ type binding struct {
 // before the keymap), so a config typo can never leave wtui unquittable;
 // and "g g" (press g twice) jumps to the top, since Update's key handling
 // only resolves single keypresses, not chords. Extra quit keys that work
-// in every mode, including while composing, go in "global":
-// { "global": { "quit": ["ctrl+x"] } }.
+// in every mode, including while composing, go in [global]:
+// quit = ["ctrl+x"].
 var defaultBindings = []binding{
 	{"global", "quit", []string{"ctrl+c"}},
 
@@ -113,9 +115,10 @@ var defaultBindings = []binding{
 }
 
 // keymap resolves a (mode, pressed key) pair to the action bound to it,
-// after merging ~/.wtui.keys.json's overrides onto defaultBindings.
+// after merging keymapPath's overrides onto defaultBindings.
 type keymap struct {
-	byKey map[string]map[string]string // mode -> key -> action
+	byKey    map[string]map[string]string   // mode -> key -> action
+	byAction map[string]map[string][]string // mode -> action -> keys, in config order
 }
 
 // action returns the action bound to key in mode, or "" if key has no
@@ -129,8 +132,31 @@ func (k *keymap) action(mode, key string) string {
 	return k.byKey[mode][key]
 }
 
+// keys returns the keys bound to action in mode, in their configured
+// order (the first is the one hints show), or nil if none.
+func (k *keymap) keys(mode, action string) []string {
+	if k == nil {
+		return nil
+	}
+	return k.byAction[mode][action]
+}
+
+// keyHint renders the first key bound to action in mode for on-screen
+// hints, abbreviating "ctrl+x" to "^x"; fallback is used when the action
+// has no keys (or there's no keymap, as in tests).
+func keyHint(mode, action, fallback string) string {
+	ks := appKeys.keys(mode, action)
+	if len(ks) == 0 {
+		return fallback
+	}
+	if rest, ok := strings.CutPrefix(ks[0], "ctrl+"); ok {
+		return "^" + rest
+	}
+	return ks[0]
+}
+
 // keymapPath is where a user overrides wtui's keybindings: $XDG_CONFIG_HOME
-// (default ~/.config) + "wtui/keys.json", the standard per-app config
+// (default ~/.config) + "wtui/keys.toml", the standard per-app config
 // location rather than a bare dotfile.
 func keymapPath() string {
 	dir := os.Getenv("XDG_CONFIG_HOME")
@@ -141,7 +167,7 @@ func keymapPath() string {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "wtui", "keys.json")
+	return filepath.Join(dir, "wtui", "keys.toml")
 }
 
 // loadKeymap builds the active keymap from defaultBindings, with any
@@ -151,12 +177,15 @@ func keymapPath() string {
 // present-but-invalid one is logged to appLog and otherwise ignored, so a
 // typo in the config degrades to defaults rather than crashing wtui.
 //
-// Config shape (only the actions you want to change):
+// Config shape (TOML; a table per mode, listing only the actions you
+// want to change):
 //
-//	{
-//	  "browse": { "markMutedRead": ["ctrl+m"], "quit": ["Q"] },
-//	  "compose": { "send": ["ctrl+enter"] }
-//	}
+//	[browse]
+//	markMutedRead = ["ctrl+m"]
+//	quit = ["Q"]
+//
+//	[compose]
+//	send = ["ctrl+enter"]
 func loadKeymap() *keymap {
 	merged := map[string]map[string][]string{} // mode -> action -> keys
 	for _, b := range defaultBindings {
@@ -169,7 +198,7 @@ func loadKeymap() *keymap {
 	path := keymapPath()
 	if data, err := os.ReadFile(path); err == nil {
 		var overrides map[string]map[string][]string
-		if err := json.Unmarshal(data, &overrides); err != nil {
+		if err := toml.Unmarshal(data, &overrides); err != nil {
 			if appLog != nil {
 				appLog.Printf("keymap: ignoring invalid %s: %v", path, err)
 			}
@@ -194,5 +223,5 @@ func loadKeymap() *keymap {
 			}
 		}
 	}
-	return &keymap{byKey: byKey}
+	return &keymap{byKey: byKey, byAction: merged}
 }
