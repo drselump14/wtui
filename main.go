@@ -199,9 +199,9 @@ type model struct {
 
 	startJID string // --chat flag's JID: opened as soon as the chat list loads; "" once consumed
 
-	searching  bool // true while the chat list's "ctrl+/" (ctrl+_) filter bar is focused
-	search     textinput.Model
-	chatFilter string // live filter text; "" means no filter (show all chats)
+	chatSearchOpen bool // true while the "ctrl+/" (ctrl+_) chat-search modal is shown
+	chatSearchSel  int  // selected row within the modal's filtered results
+	search         textinput.Model
 
 	msgSearching bool   // true while the open chat's "/" search bar is focused
 	msgQuery     string // live query text; jumps the selection to the nearest match
@@ -274,15 +274,22 @@ func initialModel() model {
 	}
 }
 
-// visibleChats returns m.chats narrowed to the live chat-list filter, or
-// m.chats itself when there's no filter active.
+// visibleChats returns the chats shown in the sidebar list, currently
+// always m.chats in full — the "ctrl+/" chat search (see chatSearchOpen)
+// finds chats in its own modal instead of filtering this list.
 func (m model) visibleChats() []Chat {
-	if m.chatFilter == "" {
-		return m.chats
+	return m.chats
+}
+
+// matchingChats returns the chats in m.chats whose name contains query
+// (case-insensitively), for the chat-search modal's results list.
+func matchingChats(chats []Chat, query string) []Chat {
+	if query == "" {
+		return chats
 	}
-	q := strings.ToLower(m.chatFilter)
-	out := make([]Chat, 0, len(m.chats))
-	for _, c := range m.chats {
+	q := strings.ToLower(query)
+	out := make([]Chat, 0, len(chats))
+	for _, c := range chats {
 		if strings.Contains(strings.ToLower(c.Name), q) {
 			out = append(out, c)
 		}
@@ -1205,14 +1212,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if lm, ok := msg.(messagesLoadedMsg); ok && lm.jid == m.openJID && m.openMsgs == nil {
 		firstLoad = true
 	}
-	oldCursor, oldFilter := m.cursor, m.chatFilter
+	oldCursor := m.cursor
 	next, cmd := m.update(msg)
 	nm := next.(model)
 	// Moving the chat-list cursor previews that chat in the message pane
 	// (focus stays on the list and the chat isn't marked read). The first
 	// chat list load previews the top chat the same way.
 	_, chatsLoaded := msg.(chatsLoadedMsg)
-	if (nm.focusList && (nm.cursor != oldCursor || nm.chatFilter != oldFilter)) ||
+	if (nm.focusList && nm.cursor != oldCursor) ||
 		(chatsLoaded && nm.openJID == "") {
 		cmd = tea.Batch(cmd, nm.previewCursor())
 	}
@@ -1223,7 +1230,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// message. Later refreshes that auto-follow the newest message don't
 	// count, so messages arriving while you watch keep their dot.
 	_, isKey := msg.(tea.KeyMsg)
-	if (isKey || firstLoad) && !nm.focusList && !nm.composing && !nm.searching &&
+	if (isKey || firstLoad) && !nm.focusList && !nm.composing && !nm.chatSearchOpen &&
 		nm.selectedMsg >= 0 && nm.selectedMsg < len(nm.openMsgs) {
 		if id := nm.openMsgs[nm.selectedMsg].MsgID; nm.unread[id] {
 			delete(nm.unread, id)
@@ -1812,43 +1819,57 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if m.searching {
+		if m.chatSearchOpen {
 			switch appKeys.action("search", key) {
 			case "close":
-				// ctrl+/ toggles the chat search: pressing it again while
-				// the bar is open closes it, same as esc.
-				m.searching = false
-				m.chatFilter = ""
+				// ctrl+/ toggles the chat search modal: pressing it again
+				// while it's open closes it, same as esc. The sidebar was
+				// never touched, so there's nothing to undo.
+				m.chatSearchOpen = false
 				m.search.Blur()
 				m.search.Reset()
-				m.cursor = 0
 				return m, nil
 			case "commit":
-				// Commit the filter and stop typing — the (still filtered)
-				// chat list stays navigable with ctrl+n/ctrl+p.
-				m.searching = false
+				// Jump the real chat list to the highlighted result and
+				// open it, same as pressing enter on it directly.
+				matches := matchingChats(m.chats, m.search.Value())
+				m.chatSearchOpen = false
 				m.search.Blur()
-				return m, nil
+				if m.chatSearchSel < 0 || m.chatSearchSel >= len(matches) {
+					return m, nil
+				}
+				c := matches[m.chatSearchSel]
+				for i, cc := range m.chats {
+					if cc.JID == c.JID {
+						m.cursor = i
+						break
+					}
+				}
+				m.focusList = false
+				cmds := []tea.Cmd{markChatReadCmd(c.JID)}
+				if c.JID != m.openJID {
+					m.switchChat(c)
+				}
+				if m.openMsgs == nil {
+					cmds = append(cmds, loadMessages(c.JID, m.mentionNames))
+				}
+				return m, tea.Batch(cmds...)
 			case "prev":
-				// Step through the filtered chats, previewing each in the
-				// message pane (without marking it read) while the search
-				// bar keeps focus.
-				if m.cursor > 0 {
-					m.cursor--
+				if m.chatSearchSel > 0 {
+					m.chatSearchSel--
 				}
-				return m, m.previewCursor()
+				return m, nil
 			case "next":
-				if m.cursor < len(m.visibleChats())-1 {
-					m.cursor++
+				if n := len(matchingChats(m.chats, m.search.Value())); m.chatSearchSel < n-1 {
+					m.chatSearchSel++
 				}
-				return m, m.previewCursor()
+				return m, nil
 			default:
 				old := m.search.Value()
 				var cmd tea.Cmd
 				m.search, cmd = m.search.Update(msg)
-				m.chatFilter = m.search.Value()
-				if m.chatFilter != old {
-					m.cursor = 0
+				if m.search.Value() != old {
+					m.chatSearchSel = 0
 				}
 				return m, cmd
 			}
@@ -2060,9 +2081,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.search.Reset()
 			return m, m.search.Focus()
 		case "searchChats":
-			m.searching = true
-			m.chatFilter = ""
-			m.cursor = 0
+			m.chatSearchOpen = true
+			m.chatSearchSel = 0
 			m.search.Prompt = "/ "
 			m.search.Placeholder = "search chats…"
 			m.search.Reset()
@@ -2276,11 +2296,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.msgQuery != "" {
 				m.msgQuery = ""
 				m.search.Reset()
-				return m, nil
-			}
-			if m.chatFilter != "" {
-				m.chatFilter = ""
-				m.cursor = 0
 			}
 			return m, nil
 		case "help":
@@ -2317,8 +2332,8 @@ func renderHelp(width, height int) string {
 		{"Y", "copy selected message's id to clipboard (debugging)"},
 		{"/", "search messages in this chat"},
 		{"n / p", "next / previous search match"},
-		{"ctrl+/", "toggle chat list search"},
-		{"esc / h", "clear filter"},
+		{"ctrl+/", "search chats (opens a modal)"},
+		{"esc / h", "clear in-chat message search"},
 		{"q, ctrl+c", "quit"},
 		{"?", "this help"},
 	}
@@ -2343,6 +2358,60 @@ func renderHelp(width, height int) string {
 		BorderForeground(rcDim).
 		Background(rcBg).
 		Padding(1, 2).
+		Render(b.String())
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderChatSearch draws the "ctrl+/" chat-search modal: a query box over a
+// scrollable list of matching chats, centered like renderHelp. It never
+// touches the real sidebar — picking a result (see "commit" in Update)
+// jumps the real cursor to it and opens it in one step.
+func renderChatSearch(matches []Chat, sel int, searchView string, boxW, width, height int) string {
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Bold(true).Render("search chats"))
+	b.WriteString("\n\n")
+	b.WriteString(searchView)
+	b.WriteString("\n\n")
+
+	rows := max(height-14, 3)
+	if len(matches) == 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(rcDim).Render("no matching chats"))
+		b.WriteString("\n")
+	} else {
+		if rows > len(matches) {
+			rows = len(matches)
+		}
+		start := 0
+		if sel >= rows {
+			start = sel - rows + 1
+		}
+		end := min(start+rows, len(matches))
+		nameW := boxW - 7
+		for i := start; i < end; i++ {
+			c := matches[i]
+			icon := "👤"
+			if c.Kind == "group" {
+				icon = "👥"
+			} else if c.Kind == "newsletter" || c.Kind == "channel" {
+				icon = "📢"
+			}
+			line := fmt.Sprintf("%s %-*s", icon, nameW, truncate(c.Name, nameW))
+			style := lipgloss.NewStyle().Foreground(rcFg)
+			if i == sel {
+				style = style.Background(rcSelection)
+			}
+			b.WriteString(style.Render(line))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString(lipgloss.NewStyle().Foreground(rcDim).Render("\n↑/↓ ^n/^p: select · enter: open · esc/ctrl+/: close"))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(rcDim).
+		Background(rcBg).
+		Padding(1, 2).
+		Width(boxW).
 		Render(b.String())
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
@@ -2397,6 +2466,15 @@ func (m model) View() string {
 	if m.showHelp {
 		return renderHelp(m.width, m.height)
 	}
+	if m.chatSearchOpen {
+		boxW := min(m.width-4, 50)
+		m.search.Width = boxW - len(m.search.Prompt) - 1
+		matches := matchingChats(m.chats, m.search.Value())
+		if m.chatSearchSel >= len(matches) {
+			m.chatSearchSel = max(len(matches)-1, 0)
+		}
+		return renderChatSearch(matches, m.chatSearchSel, m.search.View(), boxW, m.width, m.height)
+	}
 
 	listPane := renderChatList(m.visibleChats(), m.cursor, m.openJID, m.focusList, listWidth, m.height-4, m.listBottomLine(), m.mentionedChats)
 
@@ -2419,8 +2497,6 @@ func (m model) View() string {
 	footer := "?: help  q: quit"
 	if m.composing {
 		footer = "enter: send  alt+enter/ctrl+j: new line  ctrl+g: edit in $EDITOR  ctrl+v: paste image  esc: cancel"
-	} else if m.searching {
-		footer = "↑/↓ ^n/^p: select  enter: done  esc/ctrl+/: cancel"
 	} else if m.msgSearching {
 		footer = m.matchStatus() + "^n/^p: next/prev match  enter: done  esc: cancel"
 	} else if m.msgQuery != "" {
@@ -2655,15 +2731,10 @@ func renderMentionRow(cands []mentionCandidate, sel int) string {
 	return label + " " + strings.Join(parts, "  ")
 }
 
-// listBottomLine renders the chat list's bottom row: the live filter
-// textinput while searching, or a dim hint otherwise.
+// listBottomLine renders the chat list's bottom row: a dim hint pointing at
+// the "ctrl+/" chat-search modal (see renderChatSearch), which does its own
+// searching full-screen rather than filtering this list in place.
 func (m model) listBottomLine() string {
-	if m.searching {
-		return m.search.View()
-	}
-	if m.chatFilter != "" {
-		return lipgloss.NewStyle().Foreground(rcYellow).Render("/ " + m.chatFilter + " (esc to clear)")
-	}
 	return lipgloss.NewStyle().Foreground(rcDim).Render("ctrl+/: search chats")
 }
 
