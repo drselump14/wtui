@@ -413,7 +413,7 @@ func loadMessages(jid string, known map[string]string) tea.Cmd {
 			}
 			kept = append(kept, mm)
 		}
-		msgs = kept
+		msgs = dedupRetriedMedia(kept)
 
 		var need []string
 		seen := map[string]bool{}
@@ -438,6 +438,44 @@ func loadMessages(jid string, known map[string]string) tea.Cmd {
 		}
 		return messagesLoadedMsg{jid: jid, msgs: msgs, names: names, reactors: reactors}
 	}
+}
+
+// retriedMediaWindow is how close together two media messages from the same
+// sender, with the same caption, must land to be treated as one message sent
+// twice rather than two genuine sends. 6 seconds apart is what a group-chat
+// sender-key retry looks like in practice (see dedupRetriedMedia); minutes
+// apart is just the same caption reused on a different photo.
+const retriedMediaWindow = 30 * time.Second
+
+// dedupRetriedMedia drops the earlier copy of a media message that WhatsApp
+// delivered twice under two different MsgIDs: when a group's sender-key
+// session is out of sync, the recipient's client decrypts the first attempt
+// with no content (wacli logs "unhandled payload senderKeyDistributionMessage")
+// and the sender's client silently resends moments later, re-uploading the
+// media (so the two copies can even differ in size). WhatsApp's own apps
+// coalesce the retry back into the original send and show it once; wacli has
+// no notion of that linkage, so each copy arrives as its own fully-formed
+// Message and wtui would otherwise render the same caption twice in a row.
+// msgs must be ordered oldest-first, as FetchMessages returns them.
+func dedupRetriedMedia(msgs []Message) []Message {
+	out := msgs[:0]
+	for _, mm := range msgs {
+		if n := len(out); n > 0 {
+			prev := out[n-1]
+			if mm.MediaType != "" && mm.MediaType == prev.MediaType &&
+				mm.MediaCaption != "" && mm.MediaCaption == prev.MediaCaption &&
+				mm.SenderJID == prev.SenderJID && mm.FromMe == prev.FromMe {
+				pt, errP := time.Parse(time.RFC3339, prev.Timestamp)
+				ct, errC := time.Parse(time.RFC3339, mm.Timestamp)
+				if errP == nil && errC == nil && ct.Sub(pt) <= retriedMediaWindow && ct.Sub(pt) >= 0 {
+					out[n-1] = mm // keep the later, fully-resolved copy
+					continue
+				}
+			}
+		}
+		out = append(out, mm)
+	}
+	return out
 }
 
 func loadImage(jid, msgID, mediaType string) tea.Cmd {
