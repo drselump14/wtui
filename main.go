@@ -1115,7 +1115,7 @@ func autoPreviewable(msg Message) bool {
 }
 
 // hasSelectedImage reports whether the currently selected message gets
-// an automatic inline preview — the only case where one is shown at all.
+// an automatic inline preview.
 func (m model) hasSelectedImage() bool {
 	if m.selectedMsg < 0 || m.selectedMsg >= len(m.openMsgs) {
 		return false
@@ -1123,15 +1123,38 @@ func (m model) hasSelectedImage() bool {
 	return autoPreviewable(m.openMsgs[m.selectedMsg])
 }
 
-// loadSelectedImage kicks off a download for the currently selected
-// message's image, if it has one and it isn't cached yet. Called after
-// anything that can change the selection, so the preview lazily loads just
-// the one image it's about to show.
+// previewMsgIdx returns the index of the message whose image the preview
+// pane should show: the cursor's message when that one qualifies, else the
+// newest previewable message in the chat. That fallback means an incoming
+// photo shows up the moment a chat opens even though the cursor lands on
+// the oldest unread message (see messagesLoadedMsg), not on the photo
+// itself — the user shouldn't have to move the cursor just to see it.
+// -1 means there's nothing to preview.
+func (m model) previewMsgIdx() int {
+	if m.hasSelectedImage() {
+		return m.selectedMsg
+	}
+	for i := len(m.openMsgs) - 1; i >= 0; i-- {
+		if autoPreviewable(m.openMsgs[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// loadSelectedImage kicks off a download for the preview pane's current
+// target image (see previewMsgIdx), if it isn't cached yet. Called after
+// anything that can change the selection or message list, so the preview
+// lazily loads just the one image it's about to show.
 func (m model) loadSelectedImage() tea.Cmd {
-	if !kittySupported() || !m.hasSelectedImage() {
+	if !kittySupported() {
 		return nil
 	}
-	msg := m.openMsgs[m.selectedMsg]
+	idx := m.previewMsgIdx()
+	if idx < 0 {
+		return nil
+	}
+	msg := m.openMsgs[idx]
 	if m.imgCache[msg.MsgID] != nil {
 		return nil
 	}
@@ -1195,7 +1218,7 @@ func oldestUnreadIndex(msgs []Message, unread map[string]bool) int {
 func (m *model) rebuildContent() {
 	w := m.msgPaneWidth()
 	m.viewport.SetWidth(w)
-	content, lineStart := renderMessages(m.openMsgs, w, m.selectedMsg, m.unread, m.sendStatusLabels(), m.reactors)
+	content, lineStart := renderMessages(m.openMsgs, w, m.selectedMsg, m.previewMsgIdx(), m.unread, m.sendStatusLabels(), m.reactors)
 	m.msgLineStart = lineStart
 	m.viewport.SetContent(content)
 }
@@ -2671,8 +2694,8 @@ func (m model) viewContent() string {
 			verb = "saving"
 		}
 		footer = lipgloss.NewStyle().Foreground(rcYellow).Render(spinnerFrames[m.videoFrame] + " " + verb + " " + m.loadingLabel + "…")
-	} else if m.hasSelectedImage() {
-		if e := m.imgCache[m.openMsgs[m.selectedMsg].MsgID]; e != nil && e.err != "" {
+	} else if idx := m.previewMsgIdx(); idx >= 0 {
+		if e := m.imgCache[m.openMsgs[idx].MsgID]; e != nil && e.err != "" {
 			footer = lipgloss.NewStyle().Foreground(rcRed).Render("image preview error: " + e.err)
 		}
 	}
@@ -2905,11 +2928,12 @@ func (m model) listBottomLine() string {
 }
 
 // inlineImageEscapes returns the kitty graphics escape sequence (invisible,
-// zero-width control bytes) that draws the selected message's image into
-// the blank rows renderMessages reserved below its "🖼 [image]" marker,
-// positioned via an absolute cursor move relative to the viewport's current
-// scroll offset. Appending this to the footer (rather than embedding it in
-// the pane's own rendered string) means it naturally gets re-sent by
+// zero-width control bytes) that draws the preview target's image (see
+// previewMsgIdx) into the blank rows renderMessages reserved below its
+// "🖼 [image]" marker, positioned via an absolute cursor move relative to
+// the viewport's current scroll offset. Appending this to the footer
+// (rather than embedding it in the pane's own rendered string) means it
+// naturally gets re-sent by
 // bubbletea's line-diffing renderer exactly when the selection, scroll
 // position, or image changes — the footer's own string differs byte-for-byte
 // whenever that happens — and skipped otherwise. It always clears the
@@ -2937,15 +2961,16 @@ func (m model) inlineImageEscapes() string {
 	var b strings.Builder
 	b.WriteString(kittyDeleteImage(imgID))
 
-	if !m.hasSelectedImage() || m.selectedMsg+1 >= len(m.msgLineStart) {
+	idx := m.previewMsgIdx()
+	if idx < 0 || idx+1 >= len(m.msgLineStart) {
 		return b.String()
 	}
-	msg := m.openMsgs[m.selectedMsg]
+	msg := m.openMsgs[idx]
 	e := m.imgCache[msg.MsgID]
 	if e == nil || e.png == nil {
 		return b.String()
 	}
-	boxLine := m.msgLineStart[m.selectedMsg] + 2 // header line + marker line
+	boxLine := m.msgLineStart[idx] + 2 // header line + marker line
 	rel := boxLine - m.viewport.YOffset()
 	if rel < 0 || rel >= m.viewport.Height() {
 		return b.String()
@@ -3073,11 +3098,14 @@ func renderChatList(chats []Chat, cursor int, openJID string, focused bool, widt
 }
 
 // renderMessages builds the viewport content. selectedIdx's message, if
-// any, is drawn on a highlighted background across its full width, and is
-// the only message whose image (if it has one) appears in the preview
-// pane — see imagePaneEscapes. lineStart[i] is the first content line of
-// msgs[i] (lineStart[len(msgs)] is the total line count), used to scroll a
-// selection fully into view.
+// any, is drawn on a highlighted background across its full width.
+// previewIdx's message (see model.previewMsgIdx — the cursor's message when
+// it has an image, else the chat's newest one) gets the blank rows reserved
+// below its "🖼 [image]" marker that inlineImageEscapes draws into; this can
+// be a different message than selectedIdx, so an incoming photo's preview
+// doesn't require moving the cursor onto it. lineStart[i] is the first
+// content line of msgs[i] (lineStart[len(msgs)] is the total line count),
+// used to scroll a selection fully into view.
 // captionAwareText returns a message's body text, preferring MediaCaption
 // over wacli's generic "Sent <type>" DisplayText for media messages, while
 // keeping any "> quoted\n" reply header DisplayText already built.
@@ -3108,7 +3136,7 @@ func ownText(msg Message) string {
 	return ""
 }
 
-func renderMessages(msgs []Message, width int, selectedIdx int, unread map[string]bool, status map[string]sendLabel, reactors map[string][]reactionDetail) (string, []int) {
+func renderMessages(msgs []Message, width int, selectedIdx, previewIdx int, unread map[string]bool, status map[string]sendLabel, reactors map[string][]reactionDetail) (string, []int) {
 	if len(msgs) == 0 {
 		return lipgloss.NewStyle().Faint(true).Render("no messages"), nil
 	}
@@ -3191,7 +3219,7 @@ func renderMessages(msgs []Message, width int, selectedIdx int, unread map[strin
 				marker = "🎞 [gif]"
 			}
 			writeLine(row(marker, rcImage, true, rowBg))
-			if selected {
+			if i == previewIdx {
 				// Reserve blank rows for the inline preview drawn by
 				// inlineImageEscapes, so the text below doesn't overlap it.
 				for range imageBoxRows {
